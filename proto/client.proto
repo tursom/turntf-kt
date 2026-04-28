@@ -1,0 +1,471 @@
+syntax = "proto3";
+
+package notifier.client.v1;
+
+option go_package = "github.com/tursom/turntf/internal/proto;proto";
+
+message ClientEnvelope {
+  oneof body {
+    LoginRequest login = 1;
+    SendMessageRequest send_message = 2;
+    AckMessage ack_message = 3;
+    Ping ping = 4;
+    CreateUserRequest create_user = 5;
+    GetUserRequest get_user = 6;
+    UpdateUserRequest update_user = 7;
+    DeleteUserRequest delete_user = 8;
+    ListMessagesRequest list_messages = 9;
+    UpsertUserAttachmentRequest upsert_user_attachment = 10;
+    DeleteUserAttachmentRequest delete_user_attachment = 11;
+    ListUserAttachmentsRequest list_user_attachments = 12;
+    ListEventsRequest list_events = 13;
+    OperationsStatusRequest operations_status = 14;
+    MetricsRequest metrics = 15;
+    ListClusterNodesRequest list_cluster_nodes = 16;
+    ListNodeLoggedInUsersRequest list_node_logged_in_users = 17;
+    ResolveUserSessionsRequest resolve_user_sessions = 18;
+  }
+}
+
+message ServerEnvelope {
+  oneof body {
+    LoginResponse login_response = 1;
+    MessagePushed message_pushed = 2;
+    SendMessageResponse send_message_response = 3;
+    Error error = 4;
+    Pong pong = 5;
+    PacketPushed packet_pushed = 6;
+    CreateUserResponse create_user_response = 7;
+    GetUserResponse get_user_response = 8;
+    UpdateUserResponse update_user_response = 9;
+    DeleteUserResponse delete_user_response = 10;
+    ListMessagesResponse list_messages_response = 11;
+    UpsertUserAttachmentResponse upsert_user_attachment_response = 12;
+    DeleteUserAttachmentResponse delete_user_attachment_response = 13;
+    ListUserAttachmentsResponse list_user_attachments_response = 14;
+    ListEventsResponse list_events_response = 15;
+    OperationsStatusResponse operations_status_response = 16;
+    MetricsResponse metrics_response = 17;
+    ListClusterNodesResponse list_cluster_nodes_response = 18;
+    ListNodeLoggedInUsersResponse list_node_logged_in_users_response = 19;
+    ResolveUserSessionsResponse resolve_user_sessions_response = 20;
+  }
+}
+
+message LoginRequest {
+  UserRef user = 1;
+  string password = 3;
+  repeated MessageCursor seen_messages = 4;
+  bool transient_only = 5;
+}
+
+message LoginResponse {
+  User user = 1;
+  string protocol_version = 2;
+  SessionRef session_ref = 3;
+}
+
+message SendMessageRequest {
+  uint64 request_id = 1;
+  UserRef target = 2;
+  bytes body = 3;
+  ClientDeliveryKind delivery_kind = 4;
+  ClientDeliveryMode delivery_mode = 5;
+  ClientMessageSyncMode sync_mode = 6;
+  SessionRef target_session = 7;
+}
+
+message SendMessageResponse {
+  uint64 request_id = 1;
+  oneof body {
+    Message message = 2;
+    TransientAccepted transient_accepted = 3;
+  }
+}
+
+message MessagePushed {
+  Message message = 1;
+}
+
+message PacketPushed {
+  Packet packet = 1;
+}
+
+message TransientAccepted {
+  uint64 packet_id = 1;
+  int64 source_node_id = 2;
+  int64 target_node_id = 3;
+  UserRef recipient = 4;
+  ClientDeliveryMode delivery_mode = 5;
+  SessionRef target_session = 6;
+}
+
+message AckMessage {
+  MessageCursor cursor = 1;
+}
+
+message Ping {
+  uint64 request_id = 1;
+}
+
+message Pong {
+  uint64 request_id = 1;
+}
+
+message Error {
+  string code = 1;
+  string message = 2;
+  uint64 request_id = 3;
+}
+
+message CreateUserRequest {
+  uint64 request_id = 1;
+  string username = 2;
+  string password = 3;
+  bytes profile_json = 4;
+  string role = 5;
+}
+
+message GetUserRequest {
+  uint64 request_id = 1;
+  UserRef user = 2;
+}
+
+message UpdateUserRequest {
+  uint64 request_id = 1;
+  UserRef user = 2;
+  StringField username = 3;
+  StringField password = 4;
+  BytesField profile_json = 5;
+  StringField role = 6;
+}
+
+message DeleteUserRequest {
+  uint64 request_id = 1;
+  UserRef user = 2;
+}
+
+message ListMessagesRequest {
+  uint64 request_id = 1;
+  UserRef user = 2;
+  int32 limit = 3;
+}
+
+message UpsertUserAttachmentRequest {
+  uint64 request_id = 1;
+  UserRef owner = 2;
+  UserRef subject = 3;
+  AttachmentType attachment_type = 4;
+  bytes config_json = 5;
+}
+
+message DeleteUserAttachmentRequest {
+  uint64 request_id = 1;
+  UserRef owner = 2;
+  UserRef subject = 3;
+  AttachmentType attachment_type = 4;
+}
+
+message ListUserAttachmentsRequest {
+  uint64 request_id = 1;
+  UserRef owner = 2;
+  AttachmentType attachment_type = 3;
+}
+
+message ListEventsRequest {
+  uint64 request_id = 1;
+  int64 after = 2;
+  int32 limit = 3;
+}
+
+message OperationsStatusRequest {
+  uint64 request_id = 1;
+}
+
+message MetricsRequest {
+  uint64 request_id = 1;
+}
+
+message CreateUserResponse {
+  uint64 request_id = 1;
+  User user = 2;
+}
+
+message GetUserResponse {
+  uint64 request_id = 1;
+  User user = 2;
+}
+
+message UpdateUserResponse {
+  uint64 request_id = 1;
+  User user = 2;
+}
+
+message DeleteUserResponse {
+  uint64 request_id = 1;
+  string status = 2;
+  UserRef user = 3;
+}
+
+message ListMessagesResponse {
+  uint64 request_id = 1;
+  repeated Message items = 2;
+  int32 count = 3;
+}
+
+message UpsertUserAttachmentResponse {
+  uint64 request_id = 1;
+  Attachment attachment = 2;
+}
+
+message DeleteUserAttachmentResponse {
+  uint64 request_id = 1;
+  Attachment attachment = 2;
+}
+
+message ListUserAttachmentsResponse {
+  uint64 request_id = 1;
+  repeated Attachment items = 2;
+  int32 count = 3;
+}
+
+message ListEventsResponse {
+  uint64 request_id = 1;
+  repeated Event items = 2;
+  int32 count = 3;
+}
+
+message OperationsStatusResponse {
+  uint64 request_id = 1;
+  OperationsStatus status = 2;
+}
+
+message MetricsResponse {
+  uint64 request_id = 1;
+  string text = 2;
+}
+
+message ListClusterNodesRequest {
+  uint64 request_id = 1;
+}
+
+message ListClusterNodesResponse {
+  uint64 request_id = 1;
+  repeated ClusterNode items = 2;
+  int32 count = 3;
+}
+
+message ListNodeLoggedInUsersRequest {
+  uint64 request_id = 1;
+  int64 node_id = 2;
+}
+
+message ListNodeLoggedInUsersResponse {
+  uint64 request_id = 1;
+  int64 target_node_id = 2;
+  repeated LoggedInUser items = 3;
+  int32 count = 4;
+}
+
+message ResolveUserSessionsRequest {
+  uint64 request_id = 1;
+  UserRef user = 2;
+}
+
+message ResolveUserSessionsResponse {
+  uint64 request_id = 1;
+  UserRef user = 2;
+  repeated OnlineNodePresence presence = 3;
+  repeated ResolvedSession items = 4;
+  int32 count = 5;
+}
+
+message ClusterNode {
+  int64 node_id = 1;
+  bool is_local = 2;
+  string configured_url = 3;
+  string source = 4;
+}
+
+message LoggedInUser {
+  int64 node_id = 1;
+  int64 user_id = 2;
+  string username = 3;
+}
+
+message SessionRef {
+  int64 serving_node_id = 1;
+  string session_id = 2;
+}
+
+message OnlineNodePresence {
+  int64 serving_node_id = 1;
+  int32 session_count = 2;
+  string transport_hint = 3;
+}
+
+message ResolvedSession {
+  SessionRef session = 1;
+  string transport = 2;
+  bool transient_capable = 3;
+}
+
+message StringField {
+  string value = 1;
+}
+
+message BytesField {
+  bytes value = 1;
+}
+
+message MessageCursor {
+  int64 node_id = 1;
+  int64 seq = 2;
+}
+
+enum ClientDeliveryKind {
+  CLIENT_DELIVERY_KIND_UNSPECIFIED = 0;
+  CLIENT_DELIVERY_KIND_PERSISTENT = 1;
+  CLIENT_DELIVERY_KIND_TRANSIENT = 2;
+}
+
+enum ClientDeliveryMode {
+  CLIENT_DELIVERY_MODE_UNSPECIFIED = 0;
+  CLIENT_DELIVERY_MODE_BEST_EFFORT = 1;
+  CLIENT_DELIVERY_MODE_ROUTE_RETRY = 2;
+}
+
+enum ClientMessageSyncMode {
+  CLIENT_MESSAGE_SYNC_MODE_UNSPECIFIED = 0;
+  CLIENT_MESSAGE_SYNC_MODE_FORCE_SYNC = 1;
+  CLIENT_MESSAGE_SYNC_MODE_NO_SYNC = 2;
+}
+
+message UserRef {
+  int64 node_id = 1;
+  int64 user_id = 2;
+}
+
+message User {
+  int64 node_id = 1;
+  int64 user_id = 2;
+  string username = 3;
+  string role = 4;
+  bytes profile_json = 5;
+  bool system_reserved = 6;
+  string created_at = 7;
+  string updated_at = 8;
+  int64 origin_node_id = 9;
+}
+
+message Message {
+  UserRef recipient = 1;
+  int64 node_id = 3;
+  int64 seq = 4;
+  UserRef sender = 5;
+  bytes body = 6;
+  string created_at_hlc = 7;
+}
+
+message Packet {
+  uint64 packet_id = 1;
+  int64 source_node_id = 2;
+  int64 target_node_id = 3;
+  UserRef recipient = 4;
+  UserRef sender = 5;
+  bytes body = 6;
+  ClientDeliveryMode delivery_mode = 7;
+  SessionRef target_session = 8;
+}
+
+enum AttachmentType {
+  ATTACHMENT_TYPE_UNSPECIFIED = 0;
+  ATTACHMENT_TYPE_CHANNEL_MANAGER = 1;
+  ATTACHMENT_TYPE_CHANNEL_WRITER = 2;
+  ATTACHMENT_TYPE_CHANNEL_SUBSCRIPTION = 3;
+  ATTACHMENT_TYPE_USER_BLACKLIST = 4;
+}
+
+message Attachment {
+  UserRef owner = 1;
+  UserRef subject = 2;
+  AttachmentType attachment_type = 3;
+  bytes config_json = 4;
+  string attached_at = 5;
+  string deleted_at = 6;
+  int64 origin_node_id = 7;
+}
+
+message Event {
+  int64 sequence = 1;
+  int64 event_id = 2;
+  string event_type = 3;
+  string aggregate = 4;
+  int64 aggregate_node_id = 5;
+  int64 aggregate_id = 6;
+  string hlc = 7;
+  int64 origin_node_id = 8;
+  bytes event_json = 9;
+}
+
+message OperationsStatus {
+  int64 node_id = 1;
+  int32 message_window_size = 2;
+  int64 last_event_sequence = 3;
+  bool write_gate_ready = 4;
+  int64 conflict_total = 5;
+  MessageTrimStatus message_trim = 6;
+  ProjectionStatus projection = 7;
+  repeated PeerStatus peers = 8;
+  EventLogTrimStatus event_log_trim = 9;
+}
+
+message MessageTrimStatus {
+  int64 trimmed_total = 1;
+  string last_trimmed_at = 2;
+}
+
+message EventLogTrimStatus {
+  int64 trimmed_total = 1;
+  string last_trimmed_at = 2;
+}
+
+message ProjectionStatus {
+  int64 pending_total = 1;
+  string last_failed_at = 2;
+}
+
+message PeerOriginStatus {
+  int64 origin_node_id = 1;
+  int64 acked_event_id = 2;
+  int64 applied_event_id = 3;
+  int64 unconfirmed_events = 4;
+  string cursor_updated_at = 5;
+  uint64 remote_last_event_id = 6;
+  bool pending_catchup = 7;
+}
+
+message PeerStatus {
+  int64 node_id = 1;
+  string configured_url = 2;
+  bool connected = 3;
+  string session_direction = 4;
+  repeated PeerOriginStatus origins = 5;
+  int32 pending_snapshot_partitions = 6;
+  string remote_snapshot_version = 7;
+  int32 remote_message_window_size = 8;
+  int64 clock_offset_ms = 9;
+  string last_clock_sync = 10;
+  uint64 snapshot_digests_sent_total = 11;
+  uint64 snapshot_digests_received_total = 12;
+  uint64 snapshot_chunks_sent_total = 13;
+  uint64 snapshot_chunks_received_total = 14;
+  string last_snapshot_digest_at = 15;
+  string last_snapshot_chunk_at = 16;
+  string source = 17;
+  string discovered_url = 18;
+  string discovery_state = 19;
+  string last_discovered_at = 20;
+  string last_connected_at = 21;
+  string last_discovery_error = 22;
+}
