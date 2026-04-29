@@ -10,6 +10,13 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 
+/**
+ * Suspend-friendly HTTP transport for turntf's management and query endpoints.
+ *
+ * The client keeps the public API byte-oriented even when the REST surface uses embedded JSON or
+ * base64 fields, so callers can switch between HTTP and websocket transports without reshaping
+ * their domain model.
+ */
 class TurntfHttpClient(
     baseUrl: String,
     private val client: OkHttpClient = OkHttpClient()
@@ -20,8 +27,10 @@ class TurntfHttpClient(
         validateBaseUrl(baseUrl)
     }
 
+    /** Performs HTTP login with a plaintext password hashed locally before transmission. */
     suspend fun login(nodeId: Long, userId: Long, password: String): String = loginWithPassword(nodeId, userId, plainPassword(password))
 
+    /** Performs HTTP login with an already-constructed password payload. */
     suspend fun loginWithPassword(nodeId: Long, userId: Long, password: PasswordInput): String {
         require(nodeId > 0) { "nodeId is required" }
         require(userId > 0) { "userId is required" }
@@ -34,6 +43,7 @@ class TurntfHttpClient(
         return text(response, "token").also { require(it.isNotEmpty()) { "empty token in login response" } }
     }
 
+    /** Creates a user and normalizes the response into the shared public model. */
     suspend fun createUser(token: String, request: CreateUserRequest): User {
         require(request.username.isNotEmpty()) { "username is required" }
         require(request.role.isNotEmpty()) { "role is required" }
@@ -42,12 +52,15 @@ class TurntfHttpClient(
             put("role", request.role)
             request.password?.let { put("password", it.wireValue()) }
             if (request.profileJson.isNotEmpty()) {
+                // The REST API accepts embedded JSON here, while the websocket/proto API ships raw
+                // bytes. Parsing once at the boundary keeps both transports exposing ByteArray.
                 set<JsonNode>("profile", parseJsonBytes(request.profileJson))
             }
         }
         return userFromHttp(doJson("POST", "/users", token, payload, setOf(200, 201)))
     }
 
+    /** Creates a channel user, defaulting the role to `channel` when omitted by the caller. */
     suspend fun createChannel(token: String, request: CreateUserRequest): User =
         createUser(token, request.copy(role = if (request.role.isEmpty()) "channel" else request.role))
 
@@ -113,6 +126,8 @@ class TurntfHttpClient(
     ): Attachment {
         validateUserRef(owner, "owner")
         validateUserRef(subject, "subject")
+        // config_json follows the same convention as profile_json: callers hand us bytes, but the
+        // HTTP transport expects a JSON node embedded in the outer request document.
         val payload = mapper.createObjectNode().apply { set<JsonNode>("config_json", parseJsonBytes(configJson)) }
         return attachmentFromHttp(
             doJson(
@@ -160,6 +175,8 @@ class TurntfHttpClient(
                     }
                     val text = response.body?.string().orEmpty()
                     if (text.isBlank()) {
+                        // Some mutation endpoints legitimately return an empty body. Exposing that
+                        // as NullNode lets higher-level callers keep a uniform JSON parsing path.
                         mapper.nullNode()
                     } else {
                         mapper.readTree(text)

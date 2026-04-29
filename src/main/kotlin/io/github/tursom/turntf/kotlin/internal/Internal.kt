@@ -68,6 +68,8 @@ fun websocketUrl(baseUrl: String, realtime: Boolean): String {
     return URI(scheme, uri.userInfo, uri.host, uri.port, path, null, null).toString()
 }
 
+// REST endpoints embed JSON subdocuments inside larger JSON payloads; empty bytes are treated as
+// an empty object so attachment/profile helpers can reuse the same serialization path.
 fun parseJsonBytes(value: ByteArray): JsonNode = if (value.isEmpty()) mapper.createObjectNode() else mapper.readTree(value)
 
 fun text(node: JsonNode, field: String): String = node.path(field).takeUnless { it.isMissingNode || it.isNull }?.asText("") ?: ""
@@ -82,6 +84,8 @@ private fun userRefNode(node: JsonNode): UserRef = UserRef(longValue(node, "node
 
 fun userFromHttp(node: JsonNode): User {
     val profile = when {
+        // Older/newer HTTP responses may expose parsed profile content or the raw *_json bytes.
+        // Normalizing both into profileJson keeps the public model transport-agnostic.
         node.has("profile") -> mapper.writeValueAsBytes(node.path("profile"))
         node.has("profile_json") -> bytesValue(node, "profile_json")
         else -> byteArrayOf()
@@ -139,6 +143,8 @@ fun loggedInUserFromHttp(node: JsonNode): LoggedInUser = LoggedInUser(
     username = text(node, "username")
 )
 
+// HTTP handlers are inconsistent between bare arrays and {"items": [...]} envelopes, so the
+// adapter centralizes that tolerance instead of scattering shape checks across callers.
 fun itemsNode(node: JsonNode, field: String): JsonNode = if (node.isArray) node else node.path(field)
 
 fun userRefToProto(value: UserRef): Client.UserRef = Client.UserRef.newBuilder().setNodeId(value.nodeId).setUserId(value.userId).build()
@@ -171,6 +177,8 @@ fun attachmentTypeToProto(value: AttachmentType?): Client.AttachmentType = when 
     null -> Client.AttachmentType.ATTACHMENT_TYPE_UNSPECIFIED
 }
 
+// The public Kotlin model has no UNKNOWN attachment type, so forward-incompatible proto enum
+// values are collapsed to a concrete default instead of surfacing null through the API.
 fun attachmentTypeFromProto(value: Client.AttachmentType): AttachmentType = when (value) {
     Client.AttachmentType.ATTACHMENT_TYPE_CHANNEL_MANAGER -> AttachmentType.CHANNEL_MANAGER
     Client.AttachmentType.ATTACHMENT_TYPE_CHANNEL_WRITER -> AttachmentType.CHANNEL_WRITER
@@ -248,6 +256,7 @@ fun loggedInUserFromProto(value: Client.LoggedInUser): LoggedInUser = LoggedInUs
 
 fun resolvedUserSessionsFromProto(value: Client.ResolveUserSessionsResponse): ResolvedUserSessions = ResolvedUserSessions(
     user = userRefFromProto(value.user),
+    // Presence is grouped by serving node, while itemsList keeps per-session transport detail.
     presence = value.presenceList.map { ResolvedUserSessions.OnlineNodePresence(it.servingNodeId, it.sessionCount, it.transportHint) },
     sessions = value.itemsList.map { ResolvedUserSessions.ResolvedSession(sessionRefFromProto(it.session), it.transport, it.transientCapable) }
 )

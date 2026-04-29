@@ -6,11 +6,18 @@ import org.mindrot.jbcrypt.BCrypt
 import okhttp3.OkHttpClient
 import java.time.Duration
 
+/** Indicates whether a password originated from plaintext input or from an existing hash. */
 enum class PasswordSource {
     PLAIN,
     HASHED
 }
 
+/**
+ * Password wrapper shared by HTTP and websocket flows.
+ *
+ * The SDK keeps the transport payload opaque while still preserving whether the value was hashed
+ * locally or supplied pre-hashed by the caller.
+ */
 data class PasswordInput(
     val source: PasswordSource,
     val encoded: String
@@ -25,21 +32,31 @@ data class PasswordInput(
     }
 }
 
+/** Hashes plaintext input with bcrypt for turntf login and user-management requests. */
 fun hashPassword(plain: String): String {
     require(plain.isNotEmpty()) { "password is required" }
     return BCrypt.hashpw(plain, BCrypt.gensalt())
 }
 
+/** Creates a password payload from plaintext input by hashing it locally. */
 fun plainPassword(plain: String): PasswordInput = PasswordInput(PasswordSource.PLAIN, hashPassword(plain))
 
+/** Wraps an already-hashed password so the SDK can forward it without rehashing. */
 fun hashedPassword(value: String): PasswordInput = PasswordInput(PasswordSource.HASHED, value)
 
+/** Authenticated identity used by both HTTP login delegation and websocket login. */
 data class Credentials(
     val nodeId: Long,
     val userId: Long,
     val password: PasswordInput
 )
 
+/**
+ * Runtime configuration for [TurntfClient].
+ *
+ * The defaults are tuned for a long-lived session: reconnect enabled, 30-second ping interval,
+ * 10-second RPC timeout, and automatic ack emission after durable message handling.
+ */
 data class Config(
     val baseUrl: String,
     val credentials: Credentials,
@@ -269,12 +286,16 @@ data class UpdateUserRequest(
     val role: String? = null
 )
 
+/** Persists the durable cursors used by websocket reconnect and replay suppression. */
 interface CursorStore {
+    // Returned cursors are injected into the next websocket LoginRequest.seen_messages. Stores
+    // should therefore preserve a stable set of durably handled persistent messages across restarts.
     suspend fun loadSeenMessages(): List<MessageCursor>
     suspend fun saveMessage(message: Message)
     suspend fun saveCursor(cursor: MessageCursor)
 }
 
+/** In-memory [CursorStore] implementation for tests, demos, and short-lived processes. */
 class MemoryCursorStore : CursorStore {
     private val mutex = Mutex()
     private val messages = linkedMapOf<MessageCursor, Message>()
@@ -290,6 +311,9 @@ class MemoryCursorStore : CursorStore {
 
     override suspend fun saveCursor(cursor: MessageCursor) {
         mutex.withLock {
+            // A cursor can be acknowledged without the payload being available yet in custom store
+            // implementations, so the in-memory variant keeps a placeholder entry to preserve that
+            // contract and keep loadSeenMessages()/messages logically aligned.
             messages.putIfAbsent(cursor, Message(UserRef(0, 0), cursor.nodeId, cursor.seq, UserRef(0, 0), byteArrayOf(), ""))
             if (cursor !in order) {
                 order += cursor
@@ -298,6 +322,12 @@ class MemoryCursorStore : CursorStore {
     }
 }
 
+/**
+ * High-level realtime event stream emitted by [TurntfClient].
+ *
+ * Delivery events are published only after the SDK has completed the protocol bookkeeping
+ * required for the corresponding frame.
+ */
 sealed interface ClientEvent {
     data class Login(val info: LoginInfo) : ClientEvent
     data class MessageReceived(val message: Message) : ClientEvent
@@ -306,6 +336,7 @@ sealed interface ClientEvent {
     data class Disconnect(val error: Throwable) : ClientEvent
 }
 
+/** Connection lifecycle snapshot exposed by [TurntfClient.connectionState]. */
 enum class ConnectionState {
     DISCONNECTED,
     CONNECTING,
@@ -313,6 +344,7 @@ enum class ConnectionState {
     CLOSED
 }
 
+/** Base exception type for SDK-level protocol, connection, and server failures. */
 open class TurntfException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 
 class ServerError(

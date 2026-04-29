@@ -34,6 +34,13 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
+/**
+ * Coroutine-first websocket client for turntf.
+ *
+ * The client owns login, reconnect, replay suppression, request/response correlation, message
+ * durability, and Flow-based event publication. Public suspending calls resolve only after the SDK
+ * has completed the protocol bookkeeping required for that frame.
+ */
 class TurntfClient(config: Config) {
     companion object {
         private const val CLOSED_MESSAGE = "turntf client is closed"
@@ -46,6 +53,8 @@ class TurntfClient(config: Config) {
     val http = TurntfHttpClient(this.config.baseUrl, httpClient)
 
     private val runtimeDispatcher: CoroutineDispatcher = Dispatchers.IO
+    // All authenticated envelopes are funneled through a single thread so message persistence,
+    // ack emission, pending RPC completion, and event publication observe the server order.
     private val orderedDispatcher: ExecutorCoroutineDispatcher = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "turntf-kt-events").apply { isDaemon = true }
     }.asCoroutineDispatcher()
@@ -60,6 +69,8 @@ class TurntfClient(config: Config) {
     val loginState: StateFlow<LoginInfo?> = _loginState.asStateFlow()
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
+    // Request/response RPCs are correlated entirely by request_id; disconnects and timeouts must
+    // actively fail these deferreds because websocket callbacks do not do it automatically.
     private val pending = ConcurrentHashMap<Long, CompletableDeferred<Any>>()
     private val requestId = AtomicLong()
     private val stateLock = Any()
@@ -83,8 +94,11 @@ class TurntfClient(config: Config) {
     private var pingJob: Job? = null
 
     @Volatile
+    // connect() waits on the current attempt through this deferred. It is recreated whenever we
+    // spin up a fresh manager loop so callers do not accidentally await a stale successful login.
     private var firstConnect = CompletableDeferred<Unit>()
 
+    /** Starts the websocket lifecycle and suspends until the first authenticated session is ready. */
     suspend fun connect() {
         synchronized(stateLock) {
             check(!closed) { CLOSED_MESSAGE }
@@ -99,6 +113,7 @@ class TurntfClient(config: Config) {
         firstConnect.await()
     }
 
+    /** Stops reconnect attempts, closes the current websocket, and fails all pending RPCs. */
     suspend fun close() {
         synchronized(stateLock) {
             if (closed) {
@@ -117,10 +132,13 @@ class TurntfClient(config: Config) {
         orderedDispatcher.close()
     }
 
+    /** Delegates to [TurntfHttpClient.login]. */
     suspend fun login(nodeId: Long, userId: Long, password: String): String = http.login(nodeId, userId, password)
 
+    /** Delegates to [TurntfHttpClient.loginWithPassword]. */
     suspend fun loginWithPassword(nodeId: Long, userId: Long, password: PasswordInput): String = http.loginWithPassword(nodeId, userId, password)
 
+    /** Sends an application-level ping over the websocket RPC channel. */
     suspend fun ping() {
         rpc(
             build = { requestId ->
@@ -132,6 +150,10 @@ class TurntfClient(config: Config) {
         )
     }
 
+    /**
+     * Sends a durable message and returns the echoed persistent message after local persistence
+     * succeeds.
+     */
     suspend fun sendMessage(input: SendMessageInput): Message {
         validateUserRef(input.target, "target")
         require(input.body.isNotEmpty()) { "body is required" }
@@ -154,6 +176,7 @@ class TurntfClient(config: Config) {
         )
     }
 
+    /** Sends a transient packet, optionally targeting a specific online session. */
     suspend fun sendPacket(input: SendPacketInput): RelayAccepted {
         validateUserRef(input.target, "target")
         require(input.body.isNotEmpty()) { "body is required" }
@@ -423,6 +446,8 @@ class TurntfClient(config: Config) {
                 connectAttempt(attempt)
                 delayDuration = config.initialReconnectDelay
                 startPingLoop()
+                // After login succeeds, this await becomes the lifecycle gate for the active
+                // websocket attempt and completes when the socket closes or fails.
                 error = attempt.close.await() ?: IllegalStateException(DISCONNECTED_MESSAGE)
             } catch (t: Throwable) {
                 error = unwrap(t)
@@ -455,12 +480,16 @@ class TurntfClient(config: Config) {
             }
             error?.let { _events.tryEmit(ClientEvent.Error(it)) }
             delay(delayDuration.toMillis())
+            // Exponential backoff is reset only after a successful authenticated attempt so
+            // repeated handshake failures do not hammer the server.
             delayDuration = delayDuration.multipliedBy(2).coerceAtMost(config.maxReconnectDelay)
         }
     }
 
     private suspend fun connectAttempt(attempt: Attempt) {
         _connectionState.value = ConnectionState.CONNECTING
+        // seen_messages replays the durable cursor set to the server before the new session starts
+        // streaming, which lets reconnect resume without redelivering already persisted messages.
         attempt.seen = config.cursorStore.loadSeenMessages()
         val request = Request.Builder().url(websocketUrl(config.baseUrl, config.realtimeStream)).build()
         attempt.socket = httpClient.newWebSocket(request, AttemptListener(attempt))
@@ -508,6 +537,8 @@ class TurntfClient(config: Config) {
             sendEnvelope(build(id))
             return mapper(deferred.await())
         } finally {
+            // Both the timeout coroutine and websocket callback race on the same entry, so the
+            // final remove keeps whichever loses the race from leaking map state.
             pending.remove(id)
         }
     }
@@ -538,11 +569,15 @@ class TurntfClient(config: Config) {
             if (next > 0) {
                 return next
             }
+            // Proto uses uint64, but Kotlin exposes signed Long. Wrap non-positive rollover values
+            // back to zero so locally generated IDs stay representable and pass requireUnsigned().
             requestId.compareAndSet(next, 0)
         }
     }
 
     private suspend fun persistMessage(message: Message) {
+        // The cursor is saved after the message payload so reconnect cannot advertise a seen cursor
+        // that the store is unable to materialize or inspect later.
         config.cursorStore.saveMessage(message)
         config.cursorStore.saveCursor(message.cursor())
     }
@@ -553,6 +588,8 @@ class TurntfClient(config: Config) {
                 .setUser(userRefToProto(UserRef(config.credentials.nodeId, config.credentials.userId)))
                 .setPassword(config.credentials.password.wireValue())
                 .setTransientOnly(config.transientOnly)
+            // The login frame doubles as reconnect state transfer: previously seen message cursors
+            // are sent before the server starts pushing any new persistent traffic on this session.
             attempt.seen.forEach { login.addSeenMessages(cursorToProto(it)) }
             if (!webSocket.send(Client.ClientEnvelope.newBuilder().setLogin(login.build()).build().toByteArray().toByteString())) {
                 attempt.login.completeExceptionally(IllegalStateException(NOT_CONNECTED_MESSAGE))
@@ -571,6 +608,8 @@ class TurntfClient(config: Config) {
                 handleLoginEnvelope(webSocket, env)
                 return
             }
+            // Ordered processing keeps push delivery, RPC responses, and ack side effects aligned
+            // with the wire order even though OkHttp may invoke callbacks concurrently.
             orderedScope.launch {
                 handleAuthedEnvelope(env)
             }
@@ -633,6 +672,9 @@ class TurntfClient(config: Config) {
                     persistMessage(message)
                     if (config.ackMessages) {
                         try {
+                            // Ack only after local persistence. On reconnect the same cursor will be
+                            // re-advertised via seen_messages, so the server only learns about work
+                            // we have durably recorded.
                             sendEnvelope(
                                 Client.ClientEnvelope.newBuilder()
                                     .setAckMessage(Client.AckMessage.newBuilder().setCursor(cursorToProto(message.cursor())).build())
@@ -649,6 +691,9 @@ class TurntfClient(config: Config) {
                     when (env.sendMessageResponse.bodyCase) {
                         Client.SendMessageResponse.BodyCase.MESSAGE -> {
                             val message = messageFromProto(env.sendMessageResponse.message)
+                            // Persistent send responses also advance the cursor store so a client
+                            // that reconnects immediately after its own successful send does not
+                            // re-consume the echoed durable message.
                             persistMessage(message)
                             completePending(requestId, message)
                         }
@@ -674,6 +719,8 @@ class TurntfClient(config: Config) {
                 Client.ServerEnvelope.BodyCase.ERROR -> {
                     val error = ServerError(env.error.code, env.error.message, env.error.requestId)
                     if (env.error.requestId != 0L) {
+                        // request_id == 0 means the failure is not attributable to a caller-issued
+                        // RPC and should surface as a stream-level error instead of completing one.
                         failPending(requireUnsigned(env.error.requestId, "request_id"), error)
                     } else {
                         _events.tryEmit(ClientEvent.Error(error))
