@@ -90,6 +90,33 @@ data class User(
     val originNodeId: Long = 0
 )
 
+/**
+ * User-owned private metadata entry shared by HTTP and websocket APIs.
+ *
+ * The SDK always exposes [value] as raw bytes even though the HTTP transport serializes it as
+ * base64, so callers can move between transports without changing their application model.
+ */
+data class UserMetadata(
+    val owner: UserRef,
+    val key: String,
+    val value: ByteArray = byteArrayOf(),
+    val updatedAt: String = "",
+    val deletedAt: String = "",
+    val expiresAt: String = "",
+    val originNodeId: Long = 0
+)
+
+/**
+ * Cursor-based scan result for user private metadata.
+ *
+ * [nextAfter] is fed back into the next scan call to continue from the last returned key.
+ */
+data class UserMetadataScanResult(
+    val items: List<UserMetadata> = emptyList(),
+    val count: Int = 0,
+    val nextAfter: String = ""
+)
+
 data class MessageCursor(val nodeId: Long, val seq: Long)
 
 enum class DeliveryMode(val wireValue: String) {

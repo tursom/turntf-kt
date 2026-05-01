@@ -23,6 +23,8 @@ import io.github.tursom.turntf.kotlin.ResolvedUserSessions
 import io.github.tursom.turntf.kotlin.SessionRef
 import io.github.tursom.turntf.kotlin.Subscription
 import io.github.tursom.turntf.kotlin.User
+import io.github.tursom.turntf.kotlin.UserMetadata
+import io.github.tursom.turntf.kotlin.UserMetadataScanResult
 import io.github.tursom.turntf.kotlin.UserRef
 import notifier.client.v1.Client
 import com.google.protobuf.ByteString
@@ -37,6 +39,10 @@ fun validateBaseUrl(baseUrl: String) {
 fun validateUserRef(ref: UserRef, field: String) {
     require(ref.nodeId > 0) { "$field.nodeId is required" }
     require(ref.userId > 0) { "$field.userId is required" }
+}
+
+fun validateUserMetadataKey(key: String, field: String) {
+    require(key.isNotEmpty()) { "$field is required" }
 }
 
 fun validateSessionRef(ref: SessionRef, field: String) {
@@ -73,6 +79,8 @@ fun websocketUrl(baseUrl: String, realtime: Boolean): String {
 fun parseJsonBytes(value: ByteArray): JsonNode = if (value.isEmpty()) mapper.createObjectNode() else mapper.readTree(value)
 
 fun text(node: JsonNode, field: String): String = node.path(field).takeUnless { it.isMissingNode || it.isNull }?.asText("") ?: ""
+
+fun intValue(node: JsonNode, field: String): Int = node.path(field).takeUnless { it.isMissingNode || it.isNull }?.asInt() ?: 0
 
 fun longValue(node: JsonNode, field: String): Long = node.path(field).takeUnless { it.isMissingNode || it.isNull }?.asLong() ?: 0L
 
@@ -122,6 +130,16 @@ fun attachmentFromHttp(node: JsonNode): Attachment = Attachment(
     originNodeId = longValue(node, "origin_node_id")
 )
 
+fun userMetadataFromHttp(node: JsonNode): UserMetadata = UserMetadata(
+    owner = userRefNode(node.path("owner")),
+    key = text(node, "key"),
+    value = bytesValue(node, "value"),
+    updatedAt = text(node, "updated_at"),
+    deletedAt = text(node, "deleted_at"),
+    expiresAt = text(node, "expires_at"),
+    originNodeId = longValue(node, "origin_node_id")
+)
+
 fun blacklistEntryFromAttachment(attachment: Attachment): BlacklistEntry = BlacklistEntry(
     owner = attachment.owner,
     blocked = attachment.subject,
@@ -146,6 +164,15 @@ fun loggedInUserFromHttp(node: JsonNode): LoggedInUser = LoggedInUser(
 // HTTP handlers are inconsistent between bare arrays and {"items": [...]} envelopes, so the
 // adapter centralizes that tolerance instead of scattering shape checks across callers.
 fun itemsNode(node: JsonNode, field: String): JsonNode = if (node.isArray) node else node.path(field)
+
+fun userMetadataScanResultFromHttp(node: JsonNode): UserMetadataScanResult {
+    val items = itemsNode(node, "items").map(::userMetadataFromHttp)
+    return UserMetadataScanResult(
+        items = items,
+        count = if (node.isArray) items.size else intValue(node, "count"),
+        nextAfter = text(node, "next_after")
+    )
+}
 
 fun userRefToProto(value: UserRef): Client.UserRef = Client.UserRef.newBuilder().setNodeId(value.nodeId).setUserId(value.userId).build()
 
@@ -238,6 +265,16 @@ fun attachmentFromProto(value: Client.Attachment): Attachment = Attachment(
     originNodeId = value.originNodeId
 )
 
+fun userMetadataFromProto(value: Client.UserMetadata?): UserMetadata = if (value == null) UserMetadata(UserRef(0, 0), "") else UserMetadata(
+    owner = userRefFromProto(value.owner),
+    key = value.key,
+    value = value.value.toByteArray(),
+    updatedAt = value.updatedAt,
+    deletedAt = value.deletedAt,
+    expiresAt = value.expiresAt,
+    originNodeId = value.originNodeId
+)
+
 fun eventFromProto(value: Client.Event): Event = Event(
     sequence = value.sequence,
     eventId = value.eventId,
@@ -259,6 +296,12 @@ fun resolvedUserSessionsFromProto(value: Client.ResolveUserSessionsResponse): Re
     // Presence is grouped by serving node, while itemsList keeps per-session transport detail.
     presence = value.presenceList.map { ResolvedUserSessions.OnlineNodePresence(it.servingNodeId, it.sessionCount, it.transportHint) },
     sessions = value.itemsList.map { ResolvedUserSessions.ResolvedSession(sessionRefFromProto(it.session), it.transport, it.transientCapable) }
+)
+
+fun userMetadataScanResultFromProto(value: Client.ScanUserMetadataResponse): UserMetadataScanResult = UserMetadataScanResult(
+    items = value.itemsList.map(::userMetadataFromProto),
+    count = value.count,
+    nextAfter = value.nextAfter
 )
 
 fun operationsStatusFromProto(value: Client.OperationsStatus): OperationsStatus = OperationsStatus(

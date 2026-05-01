@@ -13,6 +13,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okio.ByteString.Companion.toByteString
 import org.mindrot.jbcrypt.BCrypt
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -123,6 +124,186 @@ class TurntfClientTest {
             client.ping()
             client.close()
             assertEquals(ConnectionState.CLOSED, client.connectionState.value)
+        }
+    }
+
+    @Test
+    fun userMetadataRpc() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+                    val env = Client.ClientEnvelope.parseFrom(bytes.toByteArray())
+                    when (env.bodyCase) {
+                        Client.ClientEnvelope.BodyCase.LOGIN -> {
+                            assertTrue(BCrypt.checkpw("alice-password", env.login.password))
+                            webSocket.send(
+                                Client.ServerEnvelope.newBuilder()
+                                    .setLoginResponse(
+                                        Client.LoginResponse.newBuilder()
+                                            .setUser(Client.User.newBuilder().setNodeId(4096).setUserId(1025).setUsername("alice").setRole("user").build())
+                                            .setProtocolVersion("client-v1alpha1")
+                                            .setSessionRef(Client.SessionRef.newBuilder().setServingNodeId(4096).setSessionId("session-a").build())
+                                            .build()
+                                    )
+                                    .build()
+                                    .toByteArray()
+                                    .toByteString()
+                            )
+                        }
+                        Client.ClientEnvelope.BodyCase.GET_USER_METADATA -> {
+                            assertEquals(4096, env.getUserMetadata.owner.nodeId)
+                            assertEquals(1025, env.getUserMetadata.owner.userId)
+                            assertEquals("prefs.theme", env.getUserMetadata.key)
+                            webSocket.send(
+                                Client.ServerEnvelope.newBuilder()
+                                    .setGetUserMetadataResponse(
+                                        Client.GetUserMetadataResponse.newBuilder()
+                                            .setRequestId(env.getUserMetadata.requestId)
+                                            .setMetadata(
+                                                Client.UserMetadata.newBuilder()
+                                                    .setOwner(Client.UserRef.newBuilder().setNodeId(4096).setUserId(1025).build())
+                                                    .setKey("prefs.theme")
+                                                    .setValue(ByteString.copyFrom(byteArrayOf(1, 2)))
+                                                    .setUpdatedAt("hlc-meta-1")
+                                                    .setExpiresAt("2026-05-01T00:00:00Z")
+                                                    .setOriginNodeId(4096)
+                                                    .build()
+                                            )
+                                            .build()
+                                    )
+                                    .build()
+                                    .toByteArray()
+                                    .toByteString()
+                            )
+                        }
+                        Client.ClientEnvelope.BodyCase.UPSERT_USER_METADATA -> {
+                            assertEquals("prefs.theme", env.upsertUserMetadata.key)
+                            assertTrue(env.upsertUserMetadata.hasExpiresAt())
+                            assertEquals("2026-05-01T00:00:00Z", env.upsertUserMetadata.expiresAt.value)
+                            assertContentEquals(byteArrayOf(3, 4), env.upsertUserMetadata.value.toByteArray())
+                            webSocket.send(
+                                Client.ServerEnvelope.newBuilder()
+                                    .setUpsertUserMetadataResponse(
+                                        Client.UpsertUserMetadataResponse.newBuilder()
+                                            .setRequestId(env.upsertUserMetadata.requestId)
+                                            .setMetadata(
+                                                Client.UserMetadata.newBuilder()
+                                                    .setOwner(Client.UserRef.newBuilder().setNodeId(4096).setUserId(1025).build())
+                                                    .setKey("prefs.theme")
+                                                    .setValue(env.upsertUserMetadata.value)
+                                                    .setUpdatedAt("hlc-meta-2")
+                                                    .setExpiresAt(env.upsertUserMetadata.expiresAt.value)
+                                                    .setOriginNodeId(4096)
+                                                    .build()
+                                            )
+                                            .build()
+                                    )
+                                    .build()
+                                    .toByteArray()
+                                    .toByteString()
+                            )
+                        }
+                        Client.ClientEnvelope.BodyCase.DELETE_USER_METADATA -> {
+                            assertEquals("prefs.theme", env.deleteUserMetadata.key)
+                            webSocket.send(
+                                Client.ServerEnvelope.newBuilder()
+                                    .setDeleteUserMetadataResponse(
+                                        Client.DeleteUserMetadataResponse.newBuilder()
+                                            .setRequestId(env.deleteUserMetadata.requestId)
+                                            .setMetadata(
+                                                Client.UserMetadata.newBuilder()
+                                                    .setOwner(Client.UserRef.newBuilder().setNodeId(4096).setUserId(1025).build())
+                                                    .setKey("prefs.theme")
+                                                    .setValue(ByteString.copyFrom(byteArrayOf(3, 4)))
+                                                    .setUpdatedAt("hlc-meta-2")
+                                                    .setDeletedAt("hlc-meta-3")
+                                                    .setExpiresAt("2026-05-01T00:00:00Z")
+                                                    .setOriginNodeId(4096)
+                                                    .build()
+                                            )
+                                            .build()
+                                    )
+                                    .build()
+                                    .toByteArray()
+                                    .toByteString()
+                            )
+                        }
+                        Client.ClientEnvelope.BodyCase.SCAN_USER_METADATA -> {
+                            assertEquals("prefs.", env.scanUserMetadata.prefix)
+                            assertEquals("prefs.theme", env.scanUserMetadata.after)
+                            assertEquals(2, env.scanUserMetadata.limit)
+                            webSocket.send(
+                                Client.ServerEnvelope.newBuilder()
+                                    .setScanUserMetadataResponse(
+                                        Client.ScanUserMetadataResponse.newBuilder()
+                                            .setRequestId(env.scanUserMetadata.requestId)
+                                            .addItems(
+                                                Client.UserMetadata.newBuilder()
+                                                    .setOwner(Client.UserRef.newBuilder().setNodeId(4096).setUserId(1025).build())
+                                                    .setKey("prefs.theme")
+                                                    .setValue(ByteString.copyFrom(byteArrayOf(3, 4)))
+                                                    .setUpdatedAt("hlc-meta-2")
+                                                    .setOriginNodeId(4096)
+                                                    .build()
+                                            )
+                                            .addItems(
+                                                Client.UserMetadata.newBuilder()
+                                                    .setOwner(Client.UserRef.newBuilder().setNodeId(4096).setUserId(1025).build())
+                                                    .setKey("prefs.lang")
+                                                    .setValue(ByteString.copyFrom(byteArrayOf(5, 6)))
+                                                    .setUpdatedAt("hlc-meta-4")
+                                                    .setOriginNodeId(4096)
+                                                    .build()
+                                            )
+                                            .setCount(2)
+                                            .setNextAfter("prefs.lang")
+                                            .build()
+                                    )
+                                    .build()
+                                    .toByteArray()
+                                    .toByteString()
+                            )
+                            webSocket.close(1000, "done")
+                        }
+                        else -> {}
+                    }
+                }
+            }))
+            server.start()
+
+            val client = TurntfClient(
+                Config(
+                    baseUrl = server.url("/").toString(),
+                    credentials = Credentials(4096, 1025, plainPassword("alice-password")),
+                    reconnect = false,
+                    pingInterval = java.time.Duration.ofHours(1)
+                )
+            )
+
+            val job = launch {
+                client.connect()
+            }
+            job.join()
+
+            val owner = UserRef(4096, 1025)
+            val metadata = client.getUserMetadata(owner, "prefs.theme")
+            assertContentEquals(byteArrayOf(1, 2), metadata.value)
+            assertEquals("2026-05-01T00:00:00Z", metadata.expiresAt)
+
+            val upserted = client.upsertUserMetadata(owner, "prefs.theme", byteArrayOf(3, 4), "2026-05-01T00:00:00Z")
+            assertEquals("hlc-meta-2", upserted.updatedAt)
+            assertContentEquals(byteArrayOf(3, 4), upserted.value)
+
+            val deleted = client.deleteUserMetadata(owner, "prefs.theme")
+            assertEquals("hlc-meta-3", deleted.deletedAt)
+
+            val scan = client.scanUserMetadata(owner, prefix = "prefs.", after = "prefs.theme", limit = 2)
+            assertEquals(2, scan.count)
+            assertEquals("prefs.lang", scan.nextAfter)
+            assertEquals(listOf("prefs.theme", "prefs.lang"), scan.items.map { it.key })
+            assertContentEquals(byteArrayOf(5, 6), scan.items.last().value)
+
+            client.close()
         }
     }
 }

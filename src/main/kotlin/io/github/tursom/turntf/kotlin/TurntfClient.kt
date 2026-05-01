@@ -265,6 +265,91 @@ class TurntfClient(config: Config) {
         )
     }
 
+    /** Reads one private metadata entry owned by [owner]. */
+    suspend fun getUserMetadata(owner: UserRef, key: String): UserMetadata {
+        validateUserRef(owner, "owner")
+        validateUserMetadataKey(key, "key")
+        return rpc(
+            build = { requestId ->
+                Client.ClientEnvelope.newBuilder()
+                    .setGetUserMetadata(
+                        Client.GetUserMetadataRequest.newBuilder()
+                            .setRequestId(requestId)
+                            .setOwner(userRefToProto(owner))
+                            .setKey(key)
+                            .build()
+                    )
+                    .build()
+            },
+            mapper = { value -> value as? UserMetadata ?: throw ProtocolError("missing metadata in get_user_metadata_response") }
+        )
+    }
+
+    /**
+     * Creates or replaces one private metadata entry.
+     *
+     * `expiresAt` follows the same RFC3339 string contract as the HTTP API so callers can reuse
+     * the same value across both transports.
+     */
+    suspend fun upsertUserMetadata(owner: UserRef, key: String, value: ByteArray, expiresAt: String? = null): UserMetadata {
+        validateUserRef(owner, "owner")
+        validateUserMetadataKey(key, "key")
+        return rpc(
+            build = { requestId ->
+                val builder = Client.UpsertUserMetadataRequest.newBuilder()
+                    .setRequestId(requestId)
+                    .setOwner(userRefToProto(owner))
+                    .setKey(key)
+                    .setValue(com.google.protobuf.ByteString.copyFrom(value))
+                optionalStringField(expiresAt)?.let { builder.expiresAt = it }
+                Client.ClientEnvelope.newBuilder().setUpsertUserMetadata(builder.build()).build()
+            },
+            mapper = { result -> result as? UserMetadata ?: throw ProtocolError("missing metadata in upsert_user_metadata_response") }
+        )
+    }
+
+    /** Deletes one private metadata entry and returns the tombstoned record echoed by the server. */
+    suspend fun deleteUserMetadata(owner: UserRef, key: String): UserMetadata {
+        validateUserRef(owner, "owner")
+        validateUserMetadataKey(key, "key")
+        return rpc(
+            build = { requestId ->
+                Client.ClientEnvelope.newBuilder()
+                    .setDeleteUserMetadata(
+                        Client.DeleteUserMetadataRequest.newBuilder()
+                            .setRequestId(requestId)
+                            .setOwner(userRefToProto(owner))
+                            .setKey(key)
+                            .build()
+                    )
+                    .build()
+            },
+            mapper = { value -> value as? UserMetadata ?: throw ProtocolError("missing metadata in delete_user_metadata_response") }
+        )
+    }
+
+    /** Scans private metadata in key order using the server's `prefix` / `after` / `limit` cursor semantics. */
+    suspend fun scanUserMetadata(owner: UserRef, prefix: String = "", after: String = "", limit: Int = 0): UserMetadataScanResult {
+        validateUserRef(owner, "owner")
+        require(limit >= 0) { "limit must be non-negative" }
+        return rpc(
+            build = { requestId ->
+                Client.ClientEnvelope.newBuilder()
+                    .setScanUserMetadata(
+                        Client.ScanUserMetadataRequest.newBuilder()
+                            .setRequestId(requestId)
+                            .setOwner(userRefToProto(owner))
+                            .setPrefix(prefix)
+                            .setAfter(after)
+                            .setLimit(limit)
+                            .build()
+                    )
+                    .build()
+            },
+            mapper = { value -> value as? UserMetadataScanResult ?: throw ProtocolError("missing items in scan_user_metadata_response") }
+        )
+    }
+
     suspend fun upsertAttachment(owner: UserRef, subject: UserRef, attachmentType: AttachmentType, configJson: ByteArray): Attachment {
         validateUserRef(owner, "owner")
         validateUserRef(subject, "subject")
@@ -706,6 +791,10 @@ class TurntfClient(config: Config) {
                 Client.ServerEnvelope.BodyCase.GET_USER_RESPONSE -> completePending(requireUnsigned(env.getUserResponse.requestId, "request_id"), userFromProto(env.getUserResponse.user))
                 Client.ServerEnvelope.BodyCase.UPDATE_USER_RESPONSE -> completePending(requireUnsigned(env.updateUserResponse.requestId, "request_id"), userFromProto(env.updateUserResponse.user))
                 Client.ServerEnvelope.BodyCase.DELETE_USER_RESPONSE -> completePending(requireUnsigned(env.deleteUserResponse.requestId, "request_id"), deleteUserResultFromProto(env.deleteUserResponse))
+                Client.ServerEnvelope.BodyCase.GET_USER_METADATA_RESPONSE -> completePending(requireUnsigned(env.getUserMetadataResponse.requestId, "request_id"), userMetadataFromProto(env.getUserMetadataResponse.metadata))
+                Client.ServerEnvelope.BodyCase.UPSERT_USER_METADATA_RESPONSE -> completePending(requireUnsigned(env.upsertUserMetadataResponse.requestId, "request_id"), userMetadataFromProto(env.upsertUserMetadataResponse.metadata))
+                Client.ServerEnvelope.BodyCase.DELETE_USER_METADATA_RESPONSE -> completePending(requireUnsigned(env.deleteUserMetadataResponse.requestId, "request_id"), userMetadataFromProto(env.deleteUserMetadataResponse.metadata))
+                Client.ServerEnvelope.BodyCase.SCAN_USER_METADATA_RESPONSE -> completePending(requireUnsigned(env.scanUserMetadataResponse.requestId, "request_id"), userMetadataScanResultFromProto(env.scanUserMetadataResponse))
                 Client.ServerEnvelope.BodyCase.LIST_MESSAGES_RESPONSE -> completePending(requireUnsigned(env.listMessagesResponse.requestId, "request_id"), env.listMessagesResponse.itemsList.map(::messageFromProto))
                 Client.ServerEnvelope.BodyCase.UPSERT_USER_ATTACHMENT_RESPONSE -> completePending(requireUnsigned(env.upsertUserAttachmentResponse.requestId, "request_id"), attachmentFromProto(env.upsertUserAttachmentResponse.attachment))
                 Client.ServerEnvelope.BodyCase.DELETE_USER_ATTACHMENT_RESPONSE -> completePending(requireUnsigned(env.deleteUserAttachmentResponse.requestId, "request_id"), attachmentFromProto(env.deleteUserAttachmentResponse.attachment))

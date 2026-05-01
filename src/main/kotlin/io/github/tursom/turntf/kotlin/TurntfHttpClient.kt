@@ -64,6 +64,61 @@ class TurntfHttpClient(
     suspend fun createChannel(token: String, request: CreateUserRequest): User =
         createUser(token, request.copy(role = if (request.role.isEmpty()) "channel" else request.role))
 
+    /** Reads one private metadata entry owned by [owner]. */
+    suspend fun getUserMetadata(token: String, owner: UserRef, key: String): UserMetadata {
+        validateUserRef(owner, "owner")
+        validateUserMetadataKey(key, "key")
+        return userMetadataFromHttp(doJson("GET", "/nodes/${owner.nodeId}/users/${owner.userId}/metadata/$key", token, null, setOf(200)))
+    }
+
+    /**
+     * Creates or replaces one private metadata entry.
+     *
+     * The REST API transports [value] as base64 inside JSON, but callers keep working with the raw
+     * bytes so this method matches the websocket/proto model.
+     */
+    suspend fun upsertUserMetadata(token: String, owner: UserRef, key: String, value: ByteArray, expiresAt: String? = null): UserMetadata {
+        validateUserRef(owner, "owner")
+        validateUserMetadataKey(key, "key")
+        val payload = mapper.createObjectNode().apply {
+            put("value", value)
+            expiresAt?.let { put("expires_at", it) }
+        }
+        return userMetadataFromHttp(doJson("PUT", "/nodes/${owner.nodeId}/users/${owner.userId}/metadata/$key", token, payload, setOf(200, 201)))
+    }
+
+    /** Deletes one private metadata entry and returns the tombstoned record echoed by the server. */
+    suspend fun deleteUserMetadata(token: String, owner: UserRef, key: String): UserMetadata {
+        validateUserRef(owner, "owner")
+        validateUserMetadataKey(key, "key")
+        return userMetadataFromHttp(doJson("DELETE", "/nodes/${owner.nodeId}/users/${owner.userId}/metadata/$key", token, null, setOf(200)))
+    }
+
+    /** Scans private metadata in key order using the server's `prefix` / `after` / `limit` cursor semantics. */
+    suspend fun scanUserMetadata(
+        token: String,
+        owner: UserRef,
+        prefix: String = "",
+        after: String = "",
+        limit: Int = 0
+    ): UserMetadataScanResult {
+        validateUserRef(owner, "owner")
+        require(limit >= 0) { "limit must be non-negative" }
+        val query = buildList {
+            if (prefix.isNotEmpty()) add("prefix=$prefix")
+            if (after.isNotEmpty()) add("after=$after")
+            if (limit > 0) add("limit=$limit")
+        }
+        val path = buildString {
+            append("/nodes/${owner.nodeId}/users/${owner.userId}/metadata")
+            if (query.isNotEmpty()) {
+                append("?")
+                append(query.joinToString("&"))
+            }
+        }
+        return userMetadataScanResultFromHttp(doJson("GET", path, token, null, setOf(200)))
+    }
+
     suspend fun createSubscription(token: String, user: UserRef, channel: UserRef) {
         upsertAttachment(token, user, channel, AttachmentType.CHANNEL_SUBSCRIPTION, "{}".encodeToByteArray())
     }
