@@ -156,8 +156,10 @@ HTTP 层会把 REST 中嵌套 JSON 的 `profile` / `config_json` 统一规整回
 
 ## 文档导航
 
-- [实时客户端与 HTTP API 说明](./docs/realtime-client.md)
-- [开发、测试与 proto 同步说明](./docs/development.md)
+- [SDK 总体使用指南](./docs/sdk-guide.md) — 安装、配置选择、生命周期管理、最佳实践
+- [实时客户端与 HTTP API 说明](./docs/realtime-client.md) — 实时客户端与 HTTP API 语义详解
+- [HTTP 客户端使用指南](./docs/http-client.md) — HTTP 客户端各 API 详细用法
+- [开发、测试与 proto 同步说明](./docs/development.md) — 测试覆盖、proto 同步、共享语义检查清单
 
 ## 共享语义速记
 
