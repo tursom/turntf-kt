@@ -135,8 +135,14 @@ class TurntfClient(config: Config) {
     /** Delegates to [TurntfHttpClient.login]. */
     suspend fun login(nodeId: Long, userId: Long, password: String): String = http.login(nodeId, userId, password)
 
+    /** Delegates to [TurntfHttpClient.login] using `login_name` authentication. */
+    suspend fun login(loginName: String, password: String): String = http.login(loginName, password)
+
     /** Delegates to [TurntfHttpClient.loginWithPassword]. */
     suspend fun loginWithPassword(nodeId: Long, userId: Long, password: PasswordInput): String = http.loginWithPassword(nodeId, userId, password)
+
+    /** Delegates to [TurntfHttpClient.loginWithPassword] using `login_name` authentication. */
+    suspend fun loginWithPassword(loginName: String, password: PasswordInput): String = http.loginWithPassword(loginName, password)
 
     /** Sends an application-level ping over the websocket RPC channel. */
     suspend fun ping() {
@@ -214,6 +220,7 @@ class TurntfClient(config: Config) {
                             .setPassword(request.password?.wireValue().orEmpty())
                             .setProfileJson(com.google.protobuf.ByteString.copyFrom(request.profileJson))
                             .setRole(request.role)
+                            .setLoginName(request.loginName)
                             .build()
                     )
                     .build()
@@ -247,6 +254,7 @@ class TurntfClient(config: Config) {
                 optionalPasswordField(request.password)?.let { builder.password = it }
                 optionalBytesField(request.profileJson)?.let { builder.profileJson = it }
                 optionalStringField(request.role)?.let { builder.role = it }
+                optionalStringField(request.loginName)?.let { builder.loginName = it }
                 Client.ClientEnvelope.newBuilder().setUpdateUser(builder.build()).build()
             },
             mapper = { value -> value as? User ?: throw ProtocolError("missing user in update_user_response") }
@@ -670,9 +678,13 @@ class TurntfClient(config: Config) {
     private inner class AttemptListener(private val attempt: Attempt) : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             val login = Client.LoginRequest.newBuilder()
-                .setUser(userRefToProto(UserRef(config.credentials.nodeId, config.credentials.userId)))
                 .setPassword(config.credentials.password.wireValue())
                 .setTransientOnly(config.transientOnly)
+            if (config.credentials.loginName.isNotBlank()) {
+                login.loginName = config.credentials.loginName
+            } else {
+                login.user = userRefToProto(UserRef(config.credentials.nodeId, config.credentials.userId))
+            }
             // The login frame doubles as reconnect state transfer: previously seen message cursors
             // are sent before the server starts pushing any new persistent traffic on this session.
             attempt.seen.forEach { login.addSeenMessages(cursorToProto(it)) }
@@ -832,9 +844,7 @@ class TurntfClient(config: Config) {
 
     private fun normalize(config: Config): Config {
         validateBaseUrl(config.baseUrl)
-        require(config.credentials.nodeId > 0) { "credentials.nodeId is required" }
-        require(config.credentials.userId > 0) { "credentials.userId is required" }
-        config.credentials.password.validate()
+        config.credentials.validate()
         return config
     }
 

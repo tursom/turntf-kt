@@ -79,7 +79,13 @@ val http = TurntfHttpClient("http://127.0.0.1:8080")
 val token = http.login(nodeId = 4096, userId = 1, password = "root")
 ```
 
-`TurntfHttpClient.login()` 会先在本地对明文口令做 bcrypt，再调用 `POST /auth/login`。如果你已经持有哈希值，可以改用 `loginWithPassword()`。
+也可以改用登录名认证：
+
+```kotlin
+val token = http.login(loginName = "alice.login", password = "root")
+```
+
+`TurntfHttpClient.login()` 会先在本地对明文口令做 bcrypt，再调用 `POST /auth/login`。认证 selector 必须二选一：要么传 `nodeId + userId`，要么传 `loginName`。如果你已经持有哈希值，可以改用 `loginWithPassword()`。
 
 ### 2. 建立实时连接并发送持久消息
 
@@ -125,6 +131,8 @@ runBlocking {
 }
 ```
 
+如果长连接要走登录名认证，可以写成 `Credentials(loginName = "alice.login", password = plainPassword("alice-password"))`。
+
 `connect()` 只有在第一条已认证会话可用后才会返回；`close()` 会停止重连、关闭当前 WebSocket，并让所有等待中的 RPC 以异常结束。
 
 ## API 概览
@@ -134,6 +142,7 @@ runBlocking {
 所有 HTTP 方法都是 `suspend`，典型能力包括：
 
 - 鉴权：`login()`、`loginWithPassword()`
+- `login()` / `loginWithPassword()` 同时支持 `(nodeId, userId)` 和 `loginName` 两种认证 selector
 - 用户管理：`createUser()`、`createChannel()`
 - 消息收发：`listMessages()`、`postMessage()`、`postPacket()`
 - 附件/订阅/黑名单：`upsertAttachment()`、`deleteAttachment()`、`listAttachments()`、`createSubscription()`、`blockUser()`、`unblockUser()`

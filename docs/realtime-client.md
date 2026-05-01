@@ -49,11 +49,13 @@ SDK 把口令分成两种来源：
 
 ### `Credentials`
 
-`Credentials(nodeId, userId, password)` 只用于长连接登录：
+`Credentials` 只用于长连接登录，认证 selector 必须二选一：
 
-- `nodeId` / `userId` 对应 turntf 登录用户身份
+- 旧方式：`Credentials(nodeId, userId, password)`
+- 新方式：`Credentials(loginName = "alice.login", password = ...)`
 - `password` 必须是 `PasswordInput`
 - `TurntfClient.connect()` 建立连接后，第一帧就是带这组凭据的 `LoginRequest`
+- `username` 只是用户资料字段，不参与认证
 
 ## 3. `Config` 字段逐项说明
 
@@ -102,8 +104,12 @@ SDK 把口令分成两种来源：
 
 - `login(nodeId, userId, password: String)`
   先本地 bcrypt，再调用 `/auth/login`
+- `login(loginName, password: String)`
+  按 `login_name` 登录，适合服务端已启用双轨登录的场景
 - `loginWithPassword(nodeId, userId, password: PasswordInput)`
   适合你已经决定好口令输入形式时使用
+- `loginWithPassword(loginName, password: PasswordInput)`
+  与上面相同，只是 selector 换成 `login_name`
 
 HTTP 登录返回的是 Bearer token，而不是 `LoginInfo`。这点和 WebSocket 登录不同。
 
@@ -113,6 +119,11 @@ HTTP 登录返回的是 Bearer token，而不是 `LoginInfo`。这点和 WebSock
 - `createChannel()`
 
 `createChannel()` 只是把 `role` 默认补成 `channel`，其余行为与 `createUser()` 一致。
+
+`CreateUserRequest.loginName` 可选；`UpdateUserRequest.loginName` 中：
+
+- `null` 表示不修改登录名
+- `""` 表示解绑当前登录名
 
 ### 消息与 packet
 

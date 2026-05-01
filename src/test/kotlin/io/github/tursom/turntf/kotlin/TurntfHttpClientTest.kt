@@ -23,14 +23,27 @@ class TurntfHttpClientTest {
                     return when ("${request.method} ${request.path}") {
                         "POST /auth/login" -> {
                             val body = mapper.readTree(request.body.readUtf8())
-                            assertTrue(BCrypt.checkpw("root", body.path("password").asText()))
-                            json(200, """{"token":"admin-token"}""")
+                            if (body.has("login_name")) {
+                                assertEquals("alice.login", body.path("login_name").asText())
+                                assertTrue(body.path("node_id").isMissingNode)
+                                assertTrue(body.path("user_id").isMissingNode)
+                                assertTrue(BCrypt.checkpw("root", body.path("password").asText()))
+                                json(200, """{"token":"login-name-token"}""")
+                            } else {
+                                assertEquals(4096, body.path("node_id").asInt())
+                                assertEquals(1, body.path("user_id").asInt())
+                                assertTrue(BCrypt.checkpw("root", body.path("password").asText()))
+                                json(200, """{"token":"admin-token"}""")
+                            }
                         }
                         "POST /users" -> {
                             val body = mapper.readTree(request.body.readUtf8())
                             assertTrue(BCrypt.checkpw("alice-password", body.path("password").asText()))
-                            json(201, """{"node_id":4096,"user_id":1025,"username":"alice","role":"user","profile":{"tier":"gold"}}""")
+                            assertEquals("alice.login", body.path("login_name").asText())
+                            json(201, """{"node_id":4096,"user_id":1025,"username":"alice","login_name":"alice.login","role":"user","profile":{"tier":"gold"}}""")
                         }
+                        "GET /cluster/nodes/4096/logged-in-users" ->
+                            json(200, """{"items":[{"node_id":4096,"user_id":1025,"username":"alice","login_name":"alice.login"}],"count":1}""")
                         "GET /nodes/4096/users/1025/metadata/settings.theme" -> {
                             json(200, """{"owner":{"node_id":4096,"user_id":1025},"key":"settings.theme","value":"AQI=","updated_at":"hlc-meta-1","expires_at":"2026-05-01T00:00:00Z","origin_node_id":4096}""")
                         }
@@ -63,9 +76,18 @@ class TurntfHttpClientTest {
             val client = TurntfHttpClient(server.url("/").toString())
             val token = client.login(4096, 1, "root")
             assertEquals("admin-token", token)
+            val loginNameToken = client.login("alice.login", "root")
+            assertEquals("login-name-token", loginNameToken)
 
-            val user = client.createUser(token, CreateUserRequest("alice", plainPassword("alice-password"), """{"tier":"gold"}""".encodeToByteArray(), "user"))
+            val user = client.createUser(
+                token,
+                CreateUserRequest("alice", plainPassword("alice-password"), """{"tier":"gold"}""".encodeToByteArray(), "user", "alice.login")
+            )
             assertEquals(4096, user.nodeId)
+            assertEquals("alice.login", user.loginName)
+
+            val loggedInUsers = client.listNodeLoggedInUsers(token, 4096)
+            assertEquals(listOf("alice.login"), loggedInUsers.map { it.loginName })
 
             val metadata = client.getUserMetadata(token, UserRef(4096, 1025), "settings.theme")
             assertContentEquals(byteArrayOf(1, 2), metadata.value)

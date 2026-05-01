@@ -123,6 +123,8 @@ val client = TurntfClient(
 )
 ```
 
+如果服务端已经启用登录名双轨登录，也可以把 `credentials` 写成 `Credentials(loginName = "alice.login", password = plainPassword("alice-password"))`。
+
 ## 生命周期管理
 
 ### 典型启动顺序

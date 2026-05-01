@@ -30,13 +30,34 @@ class TurntfHttpClient(
     /** Performs HTTP login with a plaintext password hashed locally before transmission. */
     suspend fun login(nodeId: Long, userId: Long, password: String): String = loginWithPassword(nodeId, userId, plainPassword(password))
 
+    /** Performs HTTP login by `login_name` with a plaintext password hashed locally before transmission. */
+    suspend fun login(loginName: String, password: String): String = loginWithPassword(loginName, plainPassword(password))
+
     /** Performs HTTP login with an already-constructed password payload. */
     suspend fun loginWithPassword(nodeId: Long, userId: Long, password: PasswordInput): String {
         require(nodeId > 0) { "nodeId is required" }
         require(userId > 0) { "userId is required" }
-        val payload = mapper.createObjectNode().apply {
+        return loginWithPassword(password) {
             put("node_id", nodeId)
             put("user_id", userId)
+        }
+    }
+
+    /**
+     * Performs HTTP login by `login_name` with an already-constructed password payload.
+     *
+     * `login_name` authentication is independent from the user's display `username`.
+     */
+    suspend fun loginWithPassword(loginName: String, password: PasswordInput): String {
+        require(loginName.isNotBlank()) { "loginName is required" }
+        return loginWithPassword(password) {
+            put("login_name", loginName)
+        }
+    }
+
+    private suspend fun loginWithPassword(password: PasswordInput, selector: com.fasterxml.jackson.databind.node.ObjectNode.() -> Unit): String {
+        val payload = mapper.createObjectNode().apply {
+            selector()
             put("password", password.wireValue())
         }
         val response = doJson("POST", "/auth/login", "", payload, setOf(200))
@@ -51,6 +72,9 @@ class TurntfHttpClient(
             put("username", request.username)
             put("role", request.role)
             request.password?.let { put("password", it.wireValue()) }
+            if (request.loginName.isNotEmpty()) {
+                put("login_name", request.loginName)
+            }
             if (request.profileJson.isNotEmpty()) {
                 // The REST API accepts embedded JSON here, while the websocket/proto API ships raw
                 // bytes. Parsing once at the boundary keeps both transports exposing ByteArray.

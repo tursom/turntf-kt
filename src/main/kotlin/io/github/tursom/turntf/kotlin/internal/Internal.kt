@@ -107,7 +107,8 @@ fun userFromHttp(node: JsonNode): User {
         systemReserved = boolValue(node, "system_reserved"),
         createdAt = text(node, "created_at"),
         updatedAt = text(node, "updated_at"),
-        originNodeId = longValue(node, "origin_node_id")
+        originNodeId = longValue(node, "origin_node_id"),
+        loginName = text(node, "login_name")
     )
 }
 
@@ -158,7 +159,8 @@ fun clusterNodeFromHttp(node: JsonNode): ClusterNode = ClusterNode(
 fun loggedInUserFromHttp(node: JsonNode): LoggedInUser = LoggedInUser(
     nodeId = longValue(node, "node_id"),
     userId = longValue(node, "user_id"),
-    username = text(node, "username")
+    username = text(node, "username"),
+    loginName = text(node, "login_name")
 )
 
 // HTTP handlers are inconsistent between bare arrays and {"items": [...]} envelopes, so the
@@ -223,7 +225,8 @@ fun userFromProto(value: Client.User?): User = if (value == null) User(0, 0, "",
     systemReserved = value.systemReserved,
     createdAt = value.createdAt,
     updatedAt = value.updatedAt,
-    originNodeId = value.originNodeId
+    originNodeId = value.originNodeId,
+    loginName = value.loginName
 )
 
 fun messageFromProto(value: Client.Message?): Message = if (value == null) Message(UserRef(0, 0), 0, 0, UserRef(0, 0), byteArrayOf(), "") else Message(
@@ -289,7 +292,8 @@ fun eventFromProto(value: Client.Event): Event = Event(
 
 fun clusterNodeFromProto(value: Client.ClusterNode): ClusterNode = ClusterNode(value.nodeId, value.isLocal, value.configuredUrl, value.source)
 
-fun loggedInUserFromProto(value: Client.LoggedInUser): LoggedInUser = LoggedInUser(value.nodeId, value.userId, value.username)
+fun loggedInUserFromProto(value: Client.LoggedInUser): LoggedInUser =
+    LoggedInUser(value.nodeId, value.userId, value.username, value.loginName)
 
 fun resolvedUserSessionsFromProto(value: Client.ResolveUserSessionsResponse): ResolvedUserSessions = ResolvedUserSessions(
     user = userRefFromProto(value.user),

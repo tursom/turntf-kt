@@ -15,6 +15,7 @@ import org.mindrot.jbcrypt.BCrypt
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -33,7 +34,15 @@ class TurntfClientTest {
                                 Client.ServerEnvelope.newBuilder()
                                     .setLoginResponse(
                                         Client.LoginResponse.newBuilder()
-                                            .setUser(Client.User.newBuilder().setNodeId(4096).setUserId(1025).setUsername("alice").setRole("user").build())
+                                            .setUser(
+                                                Client.User.newBuilder()
+                                                    .setNodeId(4096)
+                                                    .setUserId(1025)
+                                                    .setUsername("alice")
+                                                    .setRole("user")
+                                                    .setLoginName("alice.login")
+                                                    .build()
+                                            )
                                             .setProtocolVersion("client-v1alpha1")
                                             .setSessionRef(Client.SessionRef.newBuilder().setServingNodeId(4096).setSessionId("session-a").build())
                                             .build()
@@ -117,6 +126,7 @@ class TurntfClientTest {
             job.join()
             assertNotNull(client.loginState.value)
             assertEquals(ConnectionState.CONNECTED, client.connectionState.value)
+            assertEquals("alice.login", client.loginState.value?.user?.loginName)
             acked.await()
 
             val message = client.sendMessage(SendMessageInput(UserRef(4096, 1025), "payload".encodeToByteArray()))
@@ -140,7 +150,15 @@ class TurntfClientTest {
                                 Client.ServerEnvelope.newBuilder()
                                     .setLoginResponse(
                                         Client.LoginResponse.newBuilder()
-                                            .setUser(Client.User.newBuilder().setNodeId(4096).setUserId(1025).setUsername("alice").setRole("user").build())
+                                            .setUser(
+                                                Client.User.newBuilder()
+                                                    .setNodeId(4096)
+                                                    .setUserId(1025)
+                                                    .setUsername("alice")
+                                                    .setRole("user")
+                                                    .setLoginName("alice.login")
+                                                    .build()
+                                            )
                                             .setProtocolVersion("client-v1alpha1")
                                             .setSessionRef(Client.SessionRef.newBuilder().setServingNodeId(4096).setSessionId("session-a").build())
                                             .build()
@@ -302,6 +320,149 @@ class TurntfClientTest {
             assertEquals("prefs.lang", scan.nextAfter)
             assertEquals(listOf("prefs.theme", "prefs.lang"), scan.items.map { it.key })
             assertContentEquals(byteArrayOf(5, 6), scan.items.last().value)
+
+            client.close()
+        }
+    }
+
+    @Test
+    fun loginByLoginNameAndUserRpcFields() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+                    val env = Client.ClientEnvelope.parseFrom(bytes.toByteArray())
+                    when (env.bodyCase) {
+                        Client.ClientEnvelope.BodyCase.LOGIN -> {
+                            assertEquals("alice.login", env.login.loginName)
+                            assertFalse(env.login.hasUser())
+                            assertTrue(BCrypt.checkpw("alice-password", env.login.password))
+                            webSocket.send(
+                                Client.ServerEnvelope.newBuilder()
+                                    .setLoginResponse(
+                                        Client.LoginResponse.newBuilder()
+                                            .setUser(
+                                                Client.User.newBuilder()
+                                                    .setNodeId(4096)
+                                                    .setUserId(1025)
+                                                    .setUsername("alice")
+                                                    .setRole("user")
+                                                    .setLoginName("alice.login")
+                                                    .build()
+                                            )
+                                            .setProtocolVersion("client-v1alpha1")
+                                            .setSessionRef(Client.SessionRef.newBuilder().setServingNodeId(4096).setSessionId("session-a").build())
+                                            .build()
+                                    )
+                                    .build()
+                                    .toByteArray()
+                                    .toByteString()
+                            )
+                        }
+                        Client.ClientEnvelope.BodyCase.CREATE_USER -> {
+                            assertEquals("bob.login", env.createUser.loginName)
+                            assertTrue(BCrypt.checkpw("bob-password", env.createUser.password))
+                            webSocket.send(
+                                Client.ServerEnvelope.newBuilder()
+                                    .setCreateUserResponse(
+                                        Client.CreateUserResponse.newBuilder()
+                                            .setRequestId(env.createUser.requestId)
+                                            .setUser(
+                                                Client.User.newBuilder()
+                                                    .setNodeId(4096)
+                                                    .setUserId(2048)
+                                                    .setUsername("bob")
+                                                    .setRole("user")
+                                                    .setLoginName("bob.login")
+                                                    .build()
+                                            )
+                                            .build()
+                                    )
+                                    .build()
+                                    .toByteArray()
+                                    .toByteString()
+                            )
+                        }
+                        Client.ClientEnvelope.BodyCase.UPDATE_USER -> {
+                            assertTrue(env.updateUser.hasLoginName())
+                            assertEquals("", env.updateUser.loginName.value)
+                            webSocket.send(
+                                Client.ServerEnvelope.newBuilder()
+                                    .setUpdateUserResponse(
+                                        Client.UpdateUserResponse.newBuilder()
+                                            .setRequestId(env.updateUser.requestId)
+                                            .setUser(
+                                                Client.User.newBuilder()
+                                                    .setNodeId(4096)
+                                                    .setUserId(1025)
+                                                    .setUsername("alice")
+                                                    .setRole("user")
+                                                    .setLoginName("")
+                                                    .build()
+                                            )
+                                            .build()
+                                    )
+                                    .build()
+                                    .toByteArray()
+                                    .toByteString()
+                            )
+                        }
+                        Client.ClientEnvelope.BodyCase.LIST_NODE_LOGGED_IN_USERS -> {
+                            webSocket.send(
+                                Client.ServerEnvelope.newBuilder()
+                                    .setListNodeLoggedInUsersResponse(
+                                        Client.ListNodeLoggedInUsersResponse.newBuilder()
+                                            .setRequestId(env.listNodeLoggedInUsers.requestId)
+                                            .addItems(
+                                                Client.LoggedInUser.newBuilder()
+                                                    .setNodeId(4096)
+                                                    .setUserId(1025)
+                                                    .setUsername("alice")
+                                                    .setLoginName("alice.login")
+                                                    .build()
+                                            )
+                                            .setCount(1)
+                                            .build()
+                                    )
+                                    .build()
+                                    .toByteArray()
+                                    .toByteString()
+                            )
+                            webSocket.close(1000, "done")
+                        }
+                        else -> {}
+                    }
+                }
+            }))
+            server.start()
+
+            val client = TurntfClient(
+                Config(
+                    baseUrl = server.url("/").toString(),
+                    credentials = Credentials(password = plainPassword("alice-password"), loginName = "alice.login"),
+                    reconnect = false,
+                    pingInterval = java.time.Duration.ofHours(1)
+                )
+            )
+
+            val job = launch { client.connect() }
+            job.join()
+            assertEquals("alice.login", client.loginState.value?.user?.loginName)
+
+            val created = client.createUser(
+                CreateUserRequest(
+                    username = "bob",
+                    password = plainPassword("bob-password"),
+                    role = "user",
+                    loginName = "bob.login"
+                )
+            )
+            assertEquals("bob.login", created.loginName)
+
+            val updated = client.updateUser(UserRef(4096, 1025), UpdateUserRequest(loginName = ""))
+            assertEquals("", updated.loginName)
+
+            val loggedInUsers = client.listNodeLoggedInUsers(4096)
+            assertEquals(listOf("alice.login"), loggedInUsers.map { it.loginName })
 
             client.close()
         }

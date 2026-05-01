@@ -38,7 +38,14 @@ val http = TurntfHttpClient("http://127.0.0.1:8080", customClient)
 val token = http.login(nodeId = 4096, userId = 1, password = "root")
 ```
 
+也可以改用登录名认证：
+
+```kotlin
+val token = http.login(loginName = "alice.login", password = "root")
+```
+
 该方法在客户端本地使用 bcrypt 哈希明文口令，然后调用 `POST /auth/login`。返回的字符串是 Bearer token，需要在后续请求中携带。
+认证 selector 必须二选一：传 `(nodeId, userId)` 或传 `loginName`，不能混用。
 
 ### 使用已有哈希登录
 
@@ -69,13 +76,15 @@ val user = http.createUser(
         username = "alice",
         password = plainPassword("alice-password"),
         profileJson = """{"tier":"gold"}""".encodeToByteArray(),
-        role = "user"
+        role = "user",
+        loginName = "alice.login"
     )
 )
-println("created user: nodeId=${user.nodeId}, userId=${user.userId}")
+println("created user: nodeId=${user.nodeId}, userId=${user.userId}, loginName=${user.loginName}")
 ```
 
 `profileJson` 使用 `ByteArray`，HTTP 层会在边界序列化为内嵌 JSON 对象。
+`loginName` 留空表示创建时不绑定登录名。
 
 #### 创建频道
 
@@ -283,7 +292,7 @@ val users = http.listNodeLoggedInUsers(
     nodeId = 4096
 )
 for (user in users) {
-    println("userId=${user.userId}, username=${user.username}")
+    println("userId=${user.userId}, username=${user.username}, loginName=${user.loginName}")
 }
 ```
 

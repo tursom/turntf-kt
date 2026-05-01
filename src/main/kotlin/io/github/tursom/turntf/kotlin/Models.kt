@@ -44,12 +44,34 @@ fun plainPassword(plain: String): PasswordInput = PasswordInput(PasswordSource.P
 /** Wraps an already-hashed password so the SDK can forward it without rehashing. */
 fun hashedPassword(value: String): PasswordInput = PasswordInput(PasswordSource.HASHED, value)
 
-/** Authenticated identity used by both HTTP login delegation and websocket login. */
+/**
+ * Authenticated identity used by websocket login and helper HTTP login delegation.
+ *
+ * Exactly one selector must be provided:
+ * - legacy `nodeId + userId + password`
+ * - new `loginName + password`
+ *
+ * `username` is a profile field and is never used for authentication.
+ */
 data class Credentials(
-    val nodeId: Long,
-    val userId: Long,
-    val password: PasswordInput
-)
+    val nodeId: Long = 0,
+    val userId: Long = 0,
+    val password: PasswordInput,
+    val loginName: String = ""
+) {
+    fun validate() {
+        val hasUserSelector = nodeId > 0 || userId > 0
+        val hasLoginNameSelector = loginName.isNotBlank()
+        require(hasUserSelector xor hasLoginNameSelector) {
+            "exactly one of (nodeId,userId) or loginName must be provided"
+        }
+        if (hasUserSelector) {
+            require(nodeId > 0) { "credentials.nodeId is required" }
+            require(userId > 0) { "credentials.userId is required" }
+        }
+        password.validate()
+    }
+}
 
 /**
  * Runtime configuration for [TurntfClient].
@@ -87,7 +109,8 @@ data class User(
     val systemReserved: Boolean = false,
     val createdAt: String = "",
     val updatedAt: String = "",
-    val originNodeId: Long = 0
+    val originNodeId: Long = 0,
+    val loginName: String = ""
 )
 
 /**
@@ -211,7 +234,8 @@ data class ClusterNode(
 data class LoggedInUser(
     val nodeId: Long,
     val userId: Long,
-    val username: String
+    val username: String,
+    val loginName: String = ""
 )
 
 data class ResolvedUserSessions(
@@ -299,18 +323,31 @@ data class SendPacketInput(
     val targetSession: SessionRef? = null
 )
 
+/**
+ * Creates a new user or channel.
+ *
+ * `loginName` is optional. Leaving it empty means "do not bind a login name at creation time".
+ */
 data class CreateUserRequest(
     val username: String,
     val password: PasswordInput? = null,
     val profileJson: ByteArray = byteArrayOf(),
-    val role: String
+    val role: String,
+    val loginName: String = ""
 )
 
+/**
+ * Partially updates one user.
+ *
+ * `null` means "leave the field unchanged". For `loginName`, an empty string means "unbind the
+ * current login name", matching the server's dual-track login semantics.
+ */
 data class UpdateUserRequest(
     val username: String? = null,
     val password: PasswordInput? = null,
     val profileJson: ByteArray? = null,
-    val role: String? = null
+    val role: String? = null,
+    val loginName: String? = null
 )
 
 /** Persists the durable cursors used by websocket reconnect and replay suppression. */
