@@ -344,6 +344,97 @@ fun userMetadataScanResultFromHttp(node: JsonNode): UserMetadataScanResult {
     )
 }
 
+/**
+ * 从 HTTP JSON 响应中解析 [Event] 对象。
+ *
+ * @param node HTTP 响应中的 JSON 节点
+ * @return 解析后的 Event 对象
+ */
+fun eventFromHttp(node: JsonNode): Event = Event(
+    sequence = longValue(node, "sequence"),
+    eventId = longValue(node, "event_id"),
+    eventType = text(node, "event_type"),
+    aggregate = text(node, "aggregate"),
+    aggregateNodeId = longValue(node, "aggregate_node_id"),
+    aggregateId = longValue(node, "aggregate_id"),
+    hlc = text(node, "hlc"),
+    originNodeId = longValue(node, "origin_node_id"),
+    eventJson = bytesValue(node, "event_json")
+)
+
+/**
+ * 从 HTTP JSON 响应中解析 [DeleteUserResult] 对象。
+ *
+ * @param node HTTP 响应中的 JSON 节点
+ * @return 解析后的 DeleteUserResult 对象
+ */
+fun deleteUserResultFromHttp(node: JsonNode): DeleteUserResult = DeleteUserResult(
+    status = text(node, "status"),
+    user = UserRef(longValue(node, "node_id"), longValue(node, "user_id"))
+)
+
+/**
+ * 从 HTTP JSON 响应中解析 [OperationsStatus] 对象及其所有嵌套子类型。
+ *
+ * @param node HTTP 响应中的 JSON 节点
+ * @return 解析后的 OperationsStatus 对象
+ */
+fun operationsStatusFromHttp(node: JsonNode): OperationsStatus = OperationsStatus(
+    nodeId = longValue(node, "node_id"),
+    messageWindowSize = intValue(node, "message_window_size"),
+    lastEventSequence = longValue(node, "last_event_sequence"),
+    writeGateReady = boolValue(node, "write_gate_ready"),
+    conflictTotal = longValue(node, "conflict_total"),
+    messageTrim = OperationsStatus.MessageTrimStatus(
+        trimmedTotal = longValue(node.path("message_trim"), "trimmed_total"),
+        lastTrimmedAt = text(node.path("message_trim"), "last_trimmed_at")
+    ),
+    projection = OperationsStatus.ProjectionStatus(
+        pendingTotal = longValue(node.path("projection"), "pending_total"),
+        lastFailedAt = text(node.path("projection"), "last_failed_at")
+    ),
+    peers = node.path("peers").map { peer ->
+        OperationsStatus.PeerStatus(
+            nodeId = longValue(peer, "node_id"),
+            configuredUrl = text(peer, "configured_url"),
+            source = text(peer, "source"),
+            discoveredUrl = text(peer, "discovered_url"),
+            discoveryState = text(peer, "discovery_state"),
+            lastDiscoveredAt = text(peer, "last_discovered_at"),
+            lastConnectedAt = text(peer, "last_connected_at"),
+            lastDiscoveryError = text(peer, "last_discovery_error"),
+            connected = boolValue(peer, "connected"),
+            sessionDirection = text(peer, "session_direction"),
+            origins = peer.path("origins").map { origin ->
+                OperationsStatus.PeerOriginStatus(
+                    originNodeId = longValue(origin, "origin_node_id"),
+                    ackedEventId = longValue(origin, "acked_event_id"),
+                    appliedEventId = longValue(origin, "applied_event_id"),
+                    unconfirmedEvents = longValue(origin, "unconfirmed_events"),
+                    cursorUpdatedAt = text(origin, "cursor_updated_at"),
+                    remoteLastEventId = longValue(origin, "remote_last_event_id"),
+                    pendingCatchup = boolValue(origin, "pending_catchup")
+                )
+            },
+            pendingSnapshotPartitions = intValue(peer, "pending_snapshot_partitions"),
+            remoteSnapshotVersion = text(peer, "remote_snapshot_version"),
+            remoteMessageWindowSize = intValue(peer, "remote_message_window_size"),
+            clockOffsetMs = longValue(peer, "clock_offset_ms"),
+            lastClockSync = text(peer, "last_clock_sync"),
+            snapshotDigestsSentTotal = longValue(peer, "snapshot_digests_sent_total"),
+            snapshotDigestsReceivedTotal = longValue(peer, "snapshot_digests_received_total"),
+            snapshotChunksSentTotal = longValue(peer, "snapshot_chunks_sent_total"),
+            snapshotChunksReceivedTotal = longValue(peer, "snapshot_chunks_received_total"),
+            lastSnapshotDigestAt = text(peer, "last_snapshot_digest_at"),
+            lastSnapshotChunkAt = text(peer, "last_snapshot_chunk_at")
+        )
+    },
+    eventLogTrim = OperationsStatus.EventLogTrimStatus(
+        trimmedTotal = longValue(node.path("event_log_trim"), "trimmed_total"),
+        lastTrimmedAt = text(node.path("event_log_trim"), "last_trimmed_at")
+    )
+)
+
 // === Proto 转换函数 ===
 
 /**

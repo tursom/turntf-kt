@@ -475,6 +475,130 @@ class TurntfHttpClient(
         return itemsNode(response, "items").map { attachmentFromHttp(it) }
     }
 
+    /**
+     * 获取指定用户的详细信息。
+     *
+     * @param token 身份验证令牌
+     * @param target 目标用户引用
+     * @return 用户详细信息
+     * @throws IllegalArgumentException 如果目标用户引用无效
+     * @throws ConnectionError 如果网络请求失败
+     * @throws ProtocolError 如果服务器返回意外状态码
+     */
+    suspend fun getUser(token: String, target: UserRef): User {
+        validateUserRef(target, "target")
+        return userFromHttp(doJson("GET", "/nodes/${target.nodeId}/users/${target.userId}", token, null, setOf(200)))
+    }
+
+    /**
+     * 更新用户信息。仅非 null 的字段会被更新。
+     *
+     * login_name 为空字符串时解除登录名绑定。频道（role="channel"）不支持设置 login_name。
+     *
+     * @param token 身份验证令牌
+     * @param target 目标用户引用
+     * @param request 更新请求，null 字段表示不修改
+     * @return 更新后的用户信息
+     * @throws IllegalArgumentException 如果参数无效
+     * @throws ConnectionError 如果网络请求失败
+     * @throws ProtocolError 如果服务器返回意外状态码
+     */
+    suspend fun updateUser(token: String, target: UserRef, request: UpdateUserRequest): User {
+        validateUserRef(target, "target")
+        if (request.role == "channel" && !request.loginName.isNullOrBlank()) {
+            throw IllegalArgumentException("channel users cannot have a login_name")
+        }
+        val payload = mapper.createObjectNode().apply {
+            request.username?.let { put("username", it) }
+            request.loginName?.let { put("login_name", it.ifEmpty { "" }) }
+            request.password?.let { put("password", it.wireValue()) }
+            if (request.profileJson != null && request.profileJson!!.isNotEmpty()) {
+                set<JsonNode>("profile", parseJsonBytes(request.profileJson!!))
+            }
+            request.role?.let { put("role", it) }
+        }
+        return userFromHttp(doJson("PATCH", "/nodes/${target.nodeId}/users/${target.userId}", token, payload, setOf(200)))
+    }
+
+    /**
+     * 删除指定用户（软删除）。
+     *
+     * @param token 身份验证令牌
+     * @param target 目标用户引用
+     * @return 删除结果，包含操作状态和被删除用户引用
+     * @throws IllegalArgumentException 如果目标用户引用无效
+     * @throws ConnectionError 如果网络请求失败
+     * @throws ProtocolError 如果服务器返回意外状态码
+     */
+    suspend fun deleteUser(token: String, target: UserRef): DeleteUserResult {
+        validateUserRef(target, "target")
+        return deleteUserResultFromHttp(doJson("DELETE", "/nodes/${target.nodeId}/users/${target.userId}", token, null, setOf(200)))
+    }
+
+    /**
+     * 查询事件日志，支持分页游标。
+     *
+     * @param token 身份验证令牌
+     * @param after 起始事件序列号（不含），0 表示从头开始
+     * @param limit 返回事件的最大数量，0 表示使用服务端默认值
+     * @return 事件列表
+     * @throws ConnectionError 如果网络请求失败
+     * @throws ProtocolError 如果服务器返回意外状态码
+     */
+    suspend fun listEvents(token: String, after: Long = 0, limit: Int = 0): List<Event> {
+        val query = buildList {
+            if (after > 0) add("after=$after")
+            if (limit > 0) add("limit=$limit")
+        }
+        val path = buildString {
+            append("/events")
+            if (query.isNotEmpty()) {
+                append("?")
+                append(query.joinToString("&"))
+            }
+        }
+        val response = doJson("GET", path, token, null, setOf(200))
+        return itemsNode(response, "items").map(::eventFromHttp)
+    }
+
+    /**
+     * 查询节点运行状态，包含消息窗口、写闸门、投影等指标。
+     *
+     * @param token 身份验证令牌
+     * @return 运行状态信息
+     * @throws ConnectionError 如果网络请求失败
+     * @throws ProtocolError 如果服务器返回意外状态码
+     */
+    suspend fun operationsStatus(token: String): OperationsStatus =
+        operationsStatusFromHttp(doJson("GET", "/ops/status", token, null, setOf(200)))
+
+    /**
+     * 获取 Prometheus 格式的监控指标文本。
+     *
+     * @param token 身份验证令牌
+     * @return 监控指标文本（Prometheus 格式）
+     * @throws ConnectionError 如果网络请求失败
+     * @throws ProtocolError 如果服务器返回意外状态码
+     */
+    suspend fun metrics(token: String): String = withContext(Dispatchers.IO) {
+        val builder = Request.Builder().url(normalizedBaseUrl + "/metrics")
+        builder.method("GET", null)
+        if (token.isNotEmpty()) {
+            builder.header("Authorization", "Bearer $token")
+        }
+        try {
+            client.newCall(builder.build()).execute().use { response ->
+                if (response.code != 200) {
+                    val data = response.body?.string()?.trim().orEmpty()
+                    throw ProtocolError("unexpected HTTP status ${response.code}: $data")
+                }
+                response.body?.string().orEmpty()
+            }
+        } catch (e: IOException) {
+            throw ConnectionError("GET /metrics", e)
+        }
+    }
+
     private suspend fun doJson(method: String, path: String, token: String, requestBody: JsonNode?, wantStatuses: Set<Int>): JsonNode =
         withContext(Dispatchers.IO) {
             val builder = Request.Builder().url(normalizedBaseUrl + path)
