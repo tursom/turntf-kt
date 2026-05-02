@@ -35,11 +35,24 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Coroutine-first websocket client for turntf.
+ * 基于协程的 turntf WebSocket 客户端。
  *
- * The client owns login, reconnect, replay suppression, request/response correlation, message
- * durability, and Flow-based event publication. Public suspending calls resolve only after the SDK
- * has completed the protocol bookkeeping required for that frame.
+ * 客户端拥有完整的连接生命周期管理，包括：
+ * - 登录认证
+ * - 自动重连（支持指数退避）
+ * - 消息去重（通过已见游标传递）
+ * - 请求/响应关联
+ * - 消息持久化
+ * - 基于 Flow 的事件发布
+ *
+ * 公开的挂起函数仅在 SDK 完成相应协议帧所需的记账工作后才会返回。
+ * 例如，[sendMessage] 会在消息被本地持久化后才返回。
+ *
+ * @param config 客户端配置，包含服务器地址、凭据、重连策略等
+ *
+ * @see Config
+ * @see ClientEvent
+ * @see ConnectionState
  */
 class TurntfClient(config: Config) {
     companion object {
@@ -50,11 +63,20 @@ class TurntfClient(config: Config) {
 
     private val config = normalize(config)
     private val httpClient: OkHttpClient = this.config.httpClient
+
+    /**
+     * HTTP 客户端，用于执行 REST API 请求。
+     *
+     * 当需要通过 HTTP 而非 WebSocket 进行操作时使用。
+     * 与当前 WebSocket 客户端共享相同的配置。
+     *
+     * @see TurntfHttpClient
+     */
     val http = TurntfHttpClient(this.config.baseUrl, httpClient)
 
     private val runtimeDispatcher: CoroutineDispatcher = Dispatchers.IO
-    // All authenticated envelopes are funneled through a single thread so message persistence,
-    // ack emission, pending RPC completion, and event publication observe the server order.
+    // 所有经过认证的协议帧通过单一线程处理，以确保消息持久化、
+    // ACK 发送、待处理 RPC 完成和事件发布按服务器发送顺序执行。
     private val orderedDispatcher: ExecutorCoroutineDispatcher = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "turntf-kt-events").apply { isDaemon = true }
     }.asCoroutineDispatcher()
@@ -65,12 +87,36 @@ class TurntfClient(config: Config) {
     private val _loginState = MutableStateFlow<LoginInfo?>(null)
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
 
+    /**
+     * 实时事件流，用于接收客户端生命周期事件。
+     *
+     * 包括登录成功、消息接收、数据包接收、错误和断开连接等事件。
+     * 使用 SharedFlow 实现，支持多个收集者。
+     *
+     * @see ClientEvent
+     */
     val events: SharedFlow<ClientEvent> = _events.asSharedFlow()
+
+    /**
+     * 当前登录状态。
+     *
+     * 当客户端连接并认证成功后更新为 [LoginInfo]，
+     * 断开连接或关闭后更新为 `null`。
+     */
     val loginState: StateFlow<LoginInfo?> = _loginState.asStateFlow()
+
+    /**
+     * 当前连接状态。
+     *
+     * 反映 WebSocket 连接的生命周期：[DISCONNECTED] -> [CONNECTING] -> [CONNECTED] -> [CLOSED]。
+     * 自动重连过程中会循环回到 [CONNECTING]。
+     *
+     * @see ConnectionState
+     */
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
-    // Request/response RPCs are correlated entirely by request_id; disconnects and timeouts must
-    // actively fail these deferreds because websocket callbacks do not do it automatically.
+    // 请求/响应 RPC 完全通过 request_id 关联；断开连接和超时必须主动
+    // 使这些 CompletableDeferred 失败，因为 WebSocket 回调不会自动执行此操作。
     private val pending = ConcurrentHashMap<Long, CompletableDeferred<Any>>()
     private val requestId = AtomicLong()
     private val stateLock = Any()
@@ -94,11 +140,20 @@ class TurntfClient(config: Config) {
     private var pingJob: Job? = null
 
     @Volatile
-    // connect() waits on the current attempt through this deferred. It is recreated whenever we
-    // spin up a fresh manager loop so callers do not accidentally await a stale successful login.
+    // connect() 通过此 CompletableDeferred 等待当前连接尝试完成。
+    // 每次启动新的管理循环时都会重新创建，以避免调用者意外地等待陈旧的登录成功。
     private var firstConnect = CompletableDeferred<Unit>()
 
-    /** Starts the websocket lifecycle and suspends until the first authenticated session is ready. */
+    /**
+     * 启动 WebSocket 连接生命周期，并挂起直到第一个经过身份认证的会话准备就绪。
+     *
+     * 如果客户端已经连接，则立即返回。
+     * 如果客户端已关闭，则抛出 [IllegalStateException]。
+     *
+     * @throws IllegalStateException 如果客户端已关闭
+     * @throws ServerError 如果登录被服务器拒绝
+     * @throws ConnectionError 如果网络连接失败
+     */
     suspend fun connect() {
         synchronized(stateLock) {
             check(!closed) { CLOSED_MESSAGE }
@@ -113,7 +168,11 @@ class TurntfClient(config: Config) {
         firstConnect.await()
     }
 
-    /** Stops reconnect attempts, closes the current websocket, and fails all pending RPCs. */
+    /**
+     * 停止重连尝试，关闭当前 WebSocket 连接，并使所有待处理的 RPC 请求失败。
+     *
+     * 调用后客户端不再可用。所有正在等待的 [connect] 和 RPC 调用将抛出异常。
+     */
     suspend fun close() {
         synchronized(stateLock) {
             if (closed) {
@@ -132,19 +191,65 @@ class TurntfClient(config: Config) {
         orderedDispatcher.close()
     }
 
-    /** Delegates to [TurntfHttpClient.login]. */
+    /**
+     * 通过 HTTP 进行登录（委托给 [TurntfHttpClient.login]）。
+     *
+     * 使用传统方式：节点 ID + 用户 ID + 明文密码。
+     * 密码会在本地进行 bcrypt 哈希再传输。
+     *
+     * @param nodeId 节点 ID
+     * @param userId 用户 ID
+     * @param password 明文密码
+     * @return 登录令牌（JWT 字符串）
+     * @see http
+     */
     suspend fun login(nodeId: Long, userId: Long, password: String): String = http.login(nodeId, userId, password)
 
-    /** Delegates to [TurntfHttpClient.login] using `login_name` authentication. */
+    /**
+     * 通过 HTTP 进行登录（委托给 [TurntfHttpClient.login]）。
+     *
+     * 使用登录名方式。密码会在本地进行 bcrypt 哈希再传输。
+     *
+     * @param loginName 登录名
+     * @param password 明文密码
+     * @return 登录令牌（JWT 字符串）
+     * @see http
+     */
     suspend fun login(loginName: String, password: String): String = http.login(loginName, password)
 
-    /** Delegates to [TurntfHttpClient.loginWithPassword]. */
+    /**
+     * 通过 HTTP 进行登录（委托给 [TurntfHttpClient.loginWithPassword]）。
+     *
+     * 使用传统方式，但接受已包装的密码输入。
+     *
+     * @param nodeId 节点 ID
+     * @param userId 用户 ID
+     * @param password 密码输入（包装后）
+     * @return 登录令牌（JWT 字符串）
+     * @see loginWithPassword
+     */
     suspend fun loginWithPassword(nodeId: Long, userId: Long, password: PasswordInput): String = http.loginWithPassword(nodeId, userId, password)
 
-    /** Delegates to [TurntfHttpClient.loginWithPassword] using `login_name` authentication. */
+    /**
+     * 通过 HTTP 进行登录（委托给 [TurntfHttpClient.loginWithPassword]）。
+     *
+     * 使用登录名方式，但接受已包装的密码输入。
+     *
+     * @param loginName 登录名
+     * @param password 密码输入（包装后）
+     * @return 登录令牌（JWT 字符串）
+     */
     suspend fun loginWithPassword(loginName: String, password: PasswordInput): String = http.loginWithPassword(loginName, password)
 
-    /** Sends an application-level ping over the websocket RPC channel. */
+    /**
+     * 通过 WebSocket RPC 通道发送应用层心跳。
+     *
+     * 用于保持连接活跃和检测网络中断。
+     * 心跳由 [Config.pingInterval] 控制自动发送，一般不需要手动调用。
+     *
+     * @throws IllegalStateException 如果客户端未连接
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun ping() {
         rpc(
             build = { requestId ->
@@ -157,8 +262,15 @@ class TurntfClient(config: Config) {
     }
 
     /**
-     * Sends a durable message and returns the echoed persistent message after local persistence
-     * succeeds.
+     * 发送持久化消息。
+     *
+     * 消息会被服务端持久化存储，在接收者离线时暂存，上线后投递。
+     * 方法会在消息被本地持久化到 [Config.cursorStore] 后返回。
+     *
+     * @param input 发送消息的输入参数（目标用户和消息体）
+     * @return 服务端回显的持久化消息，包含分配的消息游标信息
+     * @throws IllegalArgumentException 如果目标用户无效或消息体为空
+     * @throws TimeoutException 如果请求超时
      */
     suspend fun sendMessage(input: SendMessageInput): Message {
         validateUserRef(input.target, "target")
@@ -182,7 +294,17 @@ class TurntfClient(config: Config) {
         )
     }
 
-    /** Sends a transient packet, optionally targeting a specific online session. */
+    /**
+     * 发送瞬时数据包，可选地指定目标在线会话。
+     *
+     * 瞬时数据包不会被持久化，仅在接收者当前在线时才能送达。
+     * 适用于实时通信场景。
+     *
+     * @param input 发送数据包的输入参数（目标用户、消息体、投递模式和可选的目标会话）
+     * @return 服务端的中继接受确认
+     * @throws IllegalArgumentException 如果参数无效
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun sendPacket(input: SendPacketInput): RelayAccepted {
         validateUserRef(input.target, "target")
         require(input.body.isNotEmpty()) { "body is required" }
@@ -204,9 +326,27 @@ class TurntfClient(config: Config) {
         )
     }
 
+    /**
+     * 发送瞬时数据包的便捷重载方法。
+     *
+     * @param target 目标用户
+     * @param body 数据包内容（原始字节）
+     * @param deliveryMode 投递模式
+     * @param targetSession 可选的目标会话引用
+     * @return 服务端的中继接受确认
+     * @see sendPacket
+     */
     suspend fun sendPacket(target: UserRef, body: ByteArray, deliveryMode: DeliveryMode, targetSession: SessionRef? = null): RelayAccepted =
         sendPacket(SendPacketInput(target, body, deliveryMode, targetSession))
 
+    /**
+     * 创建一个新用户。
+     *
+     * @param request 创建用户请求
+     * @return 创建成功的用户信息
+     * @throws IllegalArgumentException 如果用户名或角色为空
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun createUser(request: CreateUserRequest): User {
         require(request.username.isNotEmpty()) { "username is required" }
         require(request.role.isNotEmpty()) { "role is required" }
@@ -229,8 +369,25 @@ class TurntfClient(config: Config) {
         )
     }
 
+    /**
+     * 创建一个频道用户。
+     *
+     * 频道的角色默认为 "channel"。如果 [CreateUserRequest.role] 已设置，则使用原值。
+     *
+     * @param request 创建用户请求（角色可以留空，会自动填充为 "channel"）
+     * @return 创建成功的频道用户信息
+     * @see createUser
+     */
     suspend fun createChannel(request: CreateUserRequest): User = createUser(request.copy(role = if (request.role.isEmpty()) "channel" else request.role))
 
+    /**
+     * 获取用户信息。
+     *
+     * @param target 目标用户引用
+     * @return 用户详细信息
+     * @throws IllegalArgumentException 如果目标用户引用无效
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun getUser(target: UserRef): User {
         validateUserRef(target, "target")
         return rpc(
@@ -243,6 +400,18 @@ class TurntfClient(config: Config) {
         )
     }
 
+    /**
+     * 部分更新用户信息。
+     *
+     * 只有显式设置的字段会被更新，null 字段保持不变。
+     * 对于 `loginName`，空字符串表示解绑当前登录名。
+     *
+     * @param target 目标用户引用
+     * @param request 更新请求，每个字段为 null 表示不更新
+     * @return 更新后的用户信息
+     * @throws IllegalArgumentException 如果目标用户引用无效
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun updateUser(target: UserRef, request: UpdateUserRequest): User {
         validateUserRef(target, "target")
         return rpc(
@@ -261,6 +430,14 @@ class TurntfClient(config: Config) {
         )
     }
 
+    /**
+     * 删除一个用户。
+     *
+     * @param target 目标用户引用
+     * @return 删除操作结果，包含状态和被删除用户的引用
+     * @throws IllegalArgumentException 如果目标用户引用无效
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun deleteUser(target: UserRef): DeleteUserResult {
         validateUserRef(target, "target")
         return rpc(
@@ -273,7 +450,15 @@ class TurntfClient(config: Config) {
         )
     }
 
-    /** Reads one private metadata entry owned by [owner]. */
+    /**
+     * 读取指定用户的一条私有元数据。
+     *
+     * @param owner 元数据所属用户
+     * @param key 元数据键名
+     * @return 元数据条目
+     * @throws IllegalArgumentException 如果参数无效
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun getUserMetadata(owner: UserRef, key: String): UserMetadata {
         validateUserRef(owner, "owner")
         validateUserMetadataKey(key, "key")
@@ -294,10 +479,18 @@ class TurntfClient(config: Config) {
     }
 
     /**
-     * Creates or replaces one private metadata entry.
+     * 创建或替换一条私有元数据。
      *
-     * `expiresAt` follows the same RFC3339 string contract as the HTTP API so callers can reuse
-     * the same value across both transports.
+     * `expiresAt` 使用与服务端 HTTP API 相同的 RFC3339 字符串格式，
+     * 调用者可以在两种传输协议间复用相同的值。
+     *
+     * @param owner 元数据所属用户
+     * @param key 元数据键名
+     * @param value 元数据值（原始字节）
+     * @param expiresAt 可选的过期时间（RFC3339 格式），null 表示永不过期
+     * @return 创建或更新后的元数据条目
+     * @throws IllegalArgumentException 如果参数无效
+     * @throws TimeoutException 如果请求超时
      */
     suspend fun upsertUserMetadata(owner: UserRef, key: String, value: ByteArray, expiresAt: String? = null): UserMetadata {
         validateUserRef(owner, "owner")
@@ -316,7 +509,15 @@ class TurntfClient(config: Config) {
         )
     }
 
-    /** Deletes one private metadata entry and returns the tombstoned record echoed by the server. */
+    /**
+     * 删除一条私有元数据并返回服务端回显的已删除记录。
+     *
+     * @param owner 元数据所属用户
+     * @param key 元数据键名
+     * @return 已删除的元数据条目（tombstone 记录）
+     * @throws IllegalArgumentException 如果参数无效
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun deleteUserMetadata(owner: UserRef, key: String): UserMetadata {
         validateUserRef(owner, "owner")
         validateUserMetadataKey(key, "key")
@@ -336,7 +537,20 @@ class TurntfClient(config: Config) {
         )
     }
 
-    /** Scans private metadata in key order using the server's `prefix` / `after` / `limit` cursor semantics. */
+    /**
+     * 按键名顺序扫描私有元数据。
+     *
+     * 支持按前缀过滤、游标分页和数量限制。
+     * 使用服务端的 `prefix` / `after` / `limit` 游标语义。
+     *
+     * @param owner 元数据所属用户
+     * @param prefix 键名前缀过滤，仅返回匹配该前缀的条目
+     * @param after 游标值，从指定键之后开始扫描（包含性的 exclusive 游标）
+     * @param limit 返回结果的最大数量（0 表示服务端默认限制）
+     * @return 扫描结果，包含条目列表和下一页游标
+     * @throws IllegalArgumentException 如果参数无效
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun scanUserMetadata(owner: UserRef, prefix: String = "", after: String = "", limit: Int = 0): UserMetadataScanResult {
         validateUserRef(owner, "owner")
         require(limit >= 0) { "limit must be non-negative" }
@@ -358,6 +572,19 @@ class TurntfClient(config: Config) {
         )
     }
 
+    /**
+     * 创建或替换一个用户关系附件。
+     *
+     * 附件系统用于管理用户间的关联关系，如频道权限、黑名单等。
+     *
+     * @param owner 附件所有者（关系的主体）
+     * @param subject 附件关联的目标用户（关系的客体）
+     * @param attachmentType 附件类型
+     * @param configJson 附件配置的 JSON 数据（原始字节）
+     * @return 创建或更新后的附件
+     * @throws IllegalArgumentException 如果参数无效
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun upsertAttachment(owner: UserRef, subject: UserRef, attachmentType: AttachmentType, configJson: ByteArray): Attachment {
         validateUserRef(owner, "owner")
         validateUserRef(subject, "subject")
@@ -379,6 +606,16 @@ class TurntfClient(config: Config) {
         )
     }
 
+    /**
+     * 删除一个用户关系附件。
+     *
+     * @param owner 附件所有者
+     * @param subject 附件关联的目标用户
+     * @param attachmentType 附件类型
+     * @return 已删除的附件（tombstone 记录）
+     * @throws IllegalArgumentException 如果参数无效
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun deleteAttachment(owner: UserRef, subject: UserRef, attachmentType: AttachmentType): Attachment {
         validateUserRef(owner, "owner")
         validateUserRef(subject, "subject")
@@ -399,6 +636,15 @@ class TurntfClient(config: Config) {
         )
     }
 
+    /**
+     * 列出指定用户的所有附件，可选地按类型过滤。
+     *
+     * @param owner 附件所有者
+     * @param attachmentType 可选的附件类型过滤器，null 表示列出所有类型
+     * @return 附件列表
+     * @throws IllegalArgumentException 如果所有者引用无效
+     * @throws TimeoutException 如果请求超时
+     */
     @Suppress("UNCHECKED_CAST")
     suspend fun listAttachments(owner: UserRef, attachmentType: AttachmentType? = null): List<Attachment> {
         validateUserRef(owner, "owner")
@@ -418,32 +664,91 @@ class TurntfClient(config: Config) {
         )
     }
 
+    /**
+     * 订阅一个频道。
+     *
+     * 订阅后，频道发布的消息会推送给订阅者。
+     *
+     * @param subscriber 订阅者
+     * @param channel 被订阅的频道
+     * @return 订阅信息
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun subscribeChannel(subscriber: UserRef, channel: UserRef): Subscription =
         upsertAttachment(subscriber, channel, AttachmentType.CHANNEL_SUBSCRIPTION, "{}".encodeToByteArray()).let {
             Subscription(it.owner, it.subject, it.attachedAt, it.deletedAt, it.originNodeId)
         }
 
+    /**
+     * 取消订阅一个频道。
+     *
+     * @param subscriber 订阅者
+     * @param channel 需要取消订阅的频道
+     * @return 取消后的订阅信息（包含删除时间）
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun unsubscribeChannel(subscriber: UserRef, channel: UserRef): Subscription =
         deleteAttachment(subscriber, channel, AttachmentType.CHANNEL_SUBSCRIPTION).let {
             Subscription(it.owner, it.subject, it.attachedAt, it.deletedAt, it.originNodeId)
         }
 
+    /**
+     * 列出指定用户订阅的所有频道。
+     *
+     * @param subscriber 订阅者
+     * @return 订阅列表
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun listSubscriptions(subscriber: UserRef): List<Subscription> =
         listAttachments(subscriber, AttachmentType.CHANNEL_SUBSCRIPTION).map { Subscription(it.owner, it.subject, it.attachedAt, it.deletedAt, it.originNodeId) }
 
+    /**
+     * 拉黑一个用户。
+     *
+     * 拉黑后，被拉黑用户的消息将被屏蔽。
+     *
+     * @param owner 执行拉黑操作的用户
+     * @param blocked 被拉黑的用户
+     * @return 黑名单条目信息
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun blockUser(owner: UserRef, blocked: UserRef): BlacklistEntry =
         upsertAttachment(owner, blocked, AttachmentType.USER_BLACKLIST, "{}".encodeToByteArray()).let {
             BlacklistEntry(it.owner, it.subject, it.attachedAt, it.deletedAt, it.originNodeId)
         }
 
+    /**
+     * 解除对用户的拉黑。
+     *
+     * @param owner 执行解除拉黑操作的用户
+     * @param blocked 需要解除拉黑的用户
+     * @return 解除后的黑名单条目信息（包含删除时间）
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun unblockUser(owner: UserRef, blocked: UserRef): BlacklistEntry =
         deleteAttachment(owner, blocked, AttachmentType.USER_BLACKLIST).let {
             BlacklistEntry(it.owner, it.subject, it.attachedAt, it.deletedAt, it.originNodeId)
         }
 
+    /**
+     * 列出指定用户拉黑的所有用户。
+     *
+     * @param owner 用户引用
+     * @return 黑名单条目列表
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun listBlockedUsers(owner: UserRef): List<BlacklistEntry> =
         listAttachments(owner, AttachmentType.USER_BLACKLIST).map { BlacklistEntry(it.owner, it.subject, it.attachedAt, it.deletedAt, it.originNodeId) }
 
+    /**
+     * 列出指定目标用户的持久化消息。
+     *
+     * @param target 目标用户
+     * @param limit 返回消息的最大数量
+     * @return 消息列表
+     * @throws IllegalArgumentException 如果目标用户引用无效
+     * @throws TimeoutException 如果请求超时
+     */
     @Suppress("UNCHECKED_CAST")
     suspend fun listMessages(target: UserRef, limit: Int): List<Message> {
         validateUserRef(target, "target")
@@ -463,6 +768,14 @@ class TurntfClient(config: Config) {
         )
     }
 
+    /**
+     * 列出指定序列号之后的事件。
+     *
+     * @param after 起始事件序列号（不包含），从该序列号之后开始列出
+     * @param limit 返回事件的最大数量
+     * @return 事件列表
+     * @throws TimeoutException 如果请求超时
+     */
     @Suppress("UNCHECKED_CAST")
     suspend fun listEvents(after: Long, limit: Int): List<Event> =
         rpc(
@@ -474,6 +787,12 @@ class TurntfClient(config: Config) {
             mapper = { value -> value as? List<Event> ?: throw ProtocolError("missing items in list_events_response") }
         )
 
+    /**
+     * 列出集群中的所有节点。
+     *
+     * @return 集群节点列表
+     * @throws TimeoutException 如果请求超时
+     */
     @Suppress("UNCHECKED_CAST")
     suspend fun listClusterNodes(): List<ClusterNode> =
         rpc(
@@ -485,6 +804,14 @@ class TurntfClient(config: Config) {
             mapper = { value -> value as? List<ClusterNode> ?: throw ProtocolError("missing items in list_cluster_nodes_response") }
         )
 
+    /**
+     * 列出指定节点上当前已登录的用户。
+     *
+     * @param nodeId 目标节点 ID
+     * @return 已登录用户列表
+     * @throws IllegalArgumentException 如果节点 ID 无效
+     * @throws TimeoutException 如果请求超时
+     */
     @Suppress("UNCHECKED_CAST")
     suspend fun listNodeLoggedInUsers(nodeId: Long): List<LoggedInUser> {
         require(nodeId > 0) { "nodeId is required" }
@@ -498,6 +825,16 @@ class TurntfClient(config: Config) {
         )
     }
 
+    /**
+     * 解析目标用户的在线会话信息。
+     *
+     * 返回用户当前的在线状态、所在节点和各会话的详细信息。
+     *
+     * @param user 目标用户
+     * @return 用户的会话解析结果，包含在线状态和活跃会话列表
+     * @throws IllegalArgumentException 如果用户引用无效
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun resolveUserSessions(user: UserRef): ResolvedUserSessions {
         validateUserRef(user, "user")
         return rpc(
@@ -510,6 +847,14 @@ class TurntfClient(config: Config) {
         )
     }
 
+    /**
+     * 查询当前节点的运维状态。
+     *
+     * 返回消息窗口大小、事件序列号、写门控状态、冲突统计、对端节点状态等运维指标。
+     *
+     * @return 节点运维状态
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun operationsStatus(): OperationsStatus =
         rpc(
             build = { requestId ->
@@ -520,6 +865,12 @@ class TurntfClient(config: Config) {
             mapper = { value -> value as? OperationsStatus ?: throw ProtocolError("missing status in operations_status_response") }
         )
 
+    /**
+     * 获取节点指标信息。
+     *
+     * @return 指标信息的纯文本字符串
+     * @throws TimeoutException 如果请求超时
+     */
     suspend fun metrics(): String =
         rpc(
             build = { requestId ->
@@ -539,8 +890,8 @@ class TurntfClient(config: Config) {
                 connectAttempt(attempt)
                 delayDuration = config.initialReconnectDelay
                 startPingLoop()
-                // After login succeeds, this await becomes the lifecycle gate for the active
-                // websocket attempt and completes when the socket closes or fails.
+                // 登录成功后，此 await 成为当前活跃 WebSocket 的生命周期门控，
+                // 在套接字关闭或失败时完成。
                 error = attempt.close.await() ?: IllegalStateException(DISCONNECTED_MESSAGE)
             } catch (t: Throwable) {
                 error = unwrap(t)
@@ -573,16 +924,16 @@ class TurntfClient(config: Config) {
             }
             error?.let { _events.tryEmit(ClientEvent.Error(it)) }
             delay(delayDuration.toMillis())
-            // Exponential backoff is reset only after a successful authenticated attempt so
-            // repeated handshake failures do not hammer the server.
+            // 指数退避仅在成功的经过身份验证的尝试后重置，
+            // 因此重复的握手失败不会对服务器造成压力。
             delayDuration = delayDuration.multipliedBy(2).coerceAtMost(config.maxReconnectDelay)
         }
     }
 
     private suspend fun connectAttempt(attempt: Attempt) {
         _connectionState.value = ConnectionState.CONNECTING
-        // seen_messages replays the durable cursor set to the server before the new session starts
-        // streaming, which lets reconnect resume without redelivering already persisted messages.
+        // seen_messages 在新会话开始流式传输之前将持久化游标集重播到服务器，
+        // 这使得重新连接可以在不重复投递已持久化消息的情况下恢复。
         attempt.seen = config.cursorStore.loadSeenMessages()
         val request = Request.Builder().url(websocketUrl(config.baseUrl, config.realtimeStream)).build()
         attempt.socket = httpClient.newWebSocket(request, AttemptListener(attempt))
@@ -630,8 +981,8 @@ class TurntfClient(config: Config) {
             sendEnvelope(build(id))
             return mapper(deferred.await())
         } finally {
-            // Both the timeout coroutine and websocket callback race on the same entry, so the
-            // final remove keeps whichever loses the race from leaking map state.
+            // 超时协程和 WebSocket 回调会竞争同一个条目，
+            // 最后的 remove 确保无论谁赢得竞争，都不会泄漏映射状态。
             pending.remove(id)
         }
     }
@@ -662,15 +1013,15 @@ class TurntfClient(config: Config) {
             if (next > 0) {
                 return next
             }
-            // Proto uses uint64, but Kotlin exposes signed Long. Wrap non-positive rollover values
-            // back to zero so locally generated IDs stay representable and pass requireUnsigned().
+            // Proto 使用 uint64，但 Kotlin 使用有符号 Long。
+            // 将非正数的回绕值重置为 0，使本地生成的 ID 始终可表示并通过 requireUnsigned() 检查。
             requestId.compareAndSet(next, 0)
         }
     }
 
     private suspend fun persistMessage(message: Message) {
-        // The cursor is saved after the message payload so reconnect cannot advertise a seen cursor
-        // that the store is unable to materialize or inspect later.
+        // 游标在消息载荷之后保存，这样重连时不会广告一个存储无法
+        // 具体化或后续检查的已见游标。
         config.cursorStore.saveMessage(message)
         config.cursorStore.saveCursor(message.cursor())
     }
@@ -685,8 +1036,8 @@ class TurntfClient(config: Config) {
             } else {
                 login.user = userRefToProto(UserRef(config.credentials.nodeId, config.credentials.userId))
             }
-            // The login frame doubles as reconnect state transfer: previously seen message cursors
-            // are sent before the server starts pushing any new persistent traffic on this session.
+            // 登录帧同时作为重连状态传递：在服务器在此会话上开始推送任何
+            // 新的持久化流量之前，发送先前已见消息游标。
             attempt.seen.forEach { login.addSeenMessages(cursorToProto(it)) }
             if (!webSocket.send(Client.ClientEnvelope.newBuilder().setLogin(login.build()).build().toByteArray().toByteString())) {
                 attempt.login.completeExceptionally(IllegalStateException(NOT_CONNECTED_MESSAGE))
@@ -705,8 +1056,8 @@ class TurntfClient(config: Config) {
                 handleLoginEnvelope(webSocket, env)
                 return
             }
-            // Ordered processing keeps push delivery, RPC responses, and ack side effects aligned
-            // with the wire order even though OkHttp may invoke callbacks concurrently.
+            // 有序处理确保推送投递、RPC 响应和 ACK 副作用与线路顺序一致，
+            // 即使 OkHttp 可能并发调用回调。
             orderedScope.launch {
                 handleAuthedEnvelope(env)
             }
@@ -769,9 +1120,8 @@ class TurntfClient(config: Config) {
                     persistMessage(message)
                     if (config.ackMessages) {
                         try {
-                            // Ack only after local persistence. On reconnect the same cursor will be
-                            // re-advertised via seen_messages, so the server only learns about work
-                            // we have durably recorded.
+                            // 仅在本地持久化后发送 ACK。重连时相同的游标会通过
+                            // seen_messages 重新广告，因此服务器只会了解到我们已持久化记录的工作。
                             sendEnvelope(
                                 Client.ClientEnvelope.newBuilder()
                                     .setAckMessage(Client.AckMessage.newBuilder().setCursor(cursorToProto(message.cursor())).build())
@@ -788,9 +1138,8 @@ class TurntfClient(config: Config) {
                     when (env.sendMessageResponse.bodyCase) {
                         Client.SendMessageResponse.BodyCase.MESSAGE -> {
                             val message = messageFromProto(env.sendMessageResponse.message)
-                            // Persistent send responses also advance the cursor store so a client
-                            // that reconnects immediately after its own successful send does not
-                            // re-consume the echoed durable message.
+                            // 持久化发送响应也会推进游标存储，这样在自身成功发送后立即
+                            // 重连的客户端不会重新消费回显的持久化消息。
                             persistMessage(message)
                             completePending(requestId, message)
                         }
@@ -820,8 +1169,8 @@ class TurntfClient(config: Config) {
                 Client.ServerEnvelope.BodyCase.ERROR -> {
                     val error = ServerError(env.error.code, env.error.message, env.error.requestId)
                     if (env.error.requestId != 0L) {
-                        // request_id == 0 means the failure is not attributable to a caller-issued
-                        // RPC and should surface as a stream-level error instead of completing one.
+                        // request_id == 0 意味着该失败不能归因于调用者发出的 RPC，
+                        // 应该作为流级别错误呈现，而不是完成某个 RPC。
                         failPending(requireUnsigned(env.error.requestId, "request_id"), error)
                     } else {
                         _events.tryEmit(ClientEvent.Error(error))

@@ -30,30 +30,78 @@ import notifier.client.v1.Client
 import com.google.protobuf.ByteString
 import java.net.URI
 
+/**
+ * Jackson ObjectMapper 实例，用于 JSON 解析和序列化。
+ *
+ * 自动注册 Kotlin 模块以支持 Kotlin 数据类的序列化。
+ */
 val mapper: ObjectMapper = ObjectMapper().registerKotlinModule()
 
+/**
+ * 验证 baseUrl 不为空。
+ *
+ * @param baseUrl 待验证的基础 URL
+ * @throws IllegalArgumentException 如果 baseUrl 为空或空白
+ */
 fun validateBaseUrl(baseUrl: String) {
     require(baseUrl.isNotBlank()) { "baseUrl is required" }
 }
 
+/**
+ * 验证 [UserRef] 的节点 ID 和用户 ID 均大于 0。
+ *
+ * @param ref 待验证的用户引用
+ * @param field 字段名前缀，用于错误消息
+ * @throws IllegalArgumentException 如果 nodeId 或 userId 不合法
+ */
 fun validateUserRef(ref: UserRef, field: String) {
     require(ref.nodeId > 0) { "$field.nodeId is required" }
     require(ref.userId > 0) { "$field.userId is required" }
 }
 
+/**
+ * 验证元数据键名不为空。
+ *
+ * @param key 待验证的键名
+ * @param field 字段名前缀，用于错误消息
+ * @throws IllegalArgumentException 如果键名为空
+ */
 fun validateUserMetadataKey(key: String, field: String) {
     require(key.isNotEmpty()) { "$field is required" }
 }
 
+/**
+ * 验证 [SessionRef] 的 servingNodeId 大于 0 且 sessionId 不为空。
+ *
+ * @param ref 待验证的会话引用
+ * @param field 字段名前缀，用于错误消息
+ * @throws IllegalArgumentException 如果会话引用不合法
+ */
 fun validateSessionRef(ref: SessionRef, field: String) {
     require(ref.servingNodeId > 0) { "$field.servingNodeId is required" }
     require(ref.sessionId.isNotEmpty()) { "$field.sessionId is required" }
 }
 
+/**
+ * 验证投递模式为有效的瞬时投递模式（BEST_EFFORT 或 ROUTE_RETRY）。
+ *
+ * @param mode 待验证的投递模式
+ * @throws IllegalArgumentException 如果投递模式为 UNSPECIFIED
+ */
 fun validateDeliveryMode(mode: DeliveryMode) {
     require(mode == DeliveryMode.BEST_EFFORT || mode == DeliveryMode.ROUTE_RETRY) { "invalid deliveryMode $mode" }
 }
 
+/**
+ * 确保一个 Long 值在无符号范围内（即 >= 0）。
+ *
+ * Proto 使用 uint64 类型，而 Kotlin 使用有符号 Long，此函数用于在从 Proto 转换时进行校验。
+ *
+ * @param value 待检查的值
+ * @param field 字段名，用于错误消息
+ * @return 如果校验通过，返回原值
+ * @throws ProtocolError 如果值小于 0
+ */
 fun requireUnsigned(value: Long, field: String): Long {
     if (value < 0) {
         throw ProtocolError("$field exceeds signed long range")
@@ -61,6 +109,18 @@ fun requireUnsigned(value: Long, field: String): Long {
     return value
 }
 
+/**
+ * 将 HTTP baseUrl 转换为对应的 WebSocket URL。
+ *
+ * 根据是否启用实时流选择合适的路径后缀：
+ * - 实时模式：/ws/realtime
+ * - 客户端模式：/ws/client
+ *
+ * @param baseUrl HTTP 基础 URL
+ * @param realtime 是否使用实时 WebSocket 端点
+ * @return 完整的 WebSocket URL 字符串
+ * @throws IllegalStateException 如果基础 URL 的 scheme 不受支持
+ */
 fun websocketUrl(baseUrl: String, realtime: Boolean): String {
     val uri = URI(baseUrl)
     val scheme = when (uri.scheme) {
@@ -74,26 +134,79 @@ fun websocketUrl(baseUrl: String, realtime: Boolean): String {
     return URI(scheme, uri.userInfo, uri.host, uri.port, path, null, null).toString()
 }
 
-// REST endpoints embed JSON subdocuments inside larger JSON payloads; empty bytes are treated as
-// an empty object so attachment/profile helpers can reuse the same serialization path.
+// REST 端点在更大的 JSON 载荷中嵌入 JSON 子文档；空字节被视为空对象，
+// 以便附件/profile 辅助函数可以复用相同的序列化路径。
+
+/**
+ * 将字节数组解析为 JsonNode。
+ *
+ * 如果字节数组为空，则返回一个空对象节点，使调用者可以保持统一的 JSON 解析路径。
+ *
+ * @param value 待解析的字节数组
+ * @return 解析后的 JsonNode
+ */
 fun parseJsonBytes(value: ByteArray): JsonNode = if (value.isEmpty()) mapper.createObjectNode() else mapper.readTree(value)
 
+/**
+ * 从 JsonNode 中安全地提取指定字段的字符串值。
+ *
+ * @param node JSON 节点
+ * @param field 字段名
+ * @return 字符串值，如果字段不存在或为 null 则返回空字符串
+ */
 fun text(node: JsonNode, field: String): String = node.path(field).takeUnless { it.isMissingNode || it.isNull }?.asText("") ?: ""
 
+/**
+ * 从 JsonNode 中安全地提取指定字段的整数值。
+ *
+ * @param node JSON 节点
+ * @param field 字段名
+ * @return 整数值，如果字段不存在或为 null 则返回 0
+ */
 fun intValue(node: JsonNode, field: String): Int = node.path(field).takeUnless { it.isMissingNode || it.isNull }?.asInt() ?: 0
 
+/**
+ * 从 JsonNode 中安全地提取指定字段的长整数值。
+ *
+ * @param node JSON 节点
+ * @param field 字段名
+ * @return 长整数值，如果字段不存在或为 null 则返回 0L
+ */
 fun longValue(node: JsonNode, field: String): Long = node.path(field).takeUnless { it.isMissingNode || it.isNull }?.asLong() ?: 0L
 
+/**
+ * 从 JsonNode 中安全地提取指定字段的布尔值。
+ *
+ * @param node JSON 节点
+ * @param field 字段名
+ * @return 布尔值，如果字段不存在或为 null 则返回 false
+ */
 fun boolValue(node: JsonNode, field: String): Boolean = node.path(field).takeUnless { it.isMissingNode || it.isNull }?.asBoolean() ?: false
 
+/**
+ * 从 JsonNode 中安全地提取指定字段的字节数组值。
+ *
+ * @param node JSON 节点
+ * @param field 字段名
+ * @return 字节数组，如果字段不存在或为 null 则返回空数组
+ */
 fun bytesValue(node: JsonNode, field: String): ByteArray = node.path(field).takeUnless { it.isMissingNode || it.isNull }?.binaryValue() ?: byteArrayOf()
 
 private fun userRefNode(node: JsonNode): UserRef = UserRef(longValue(node, "node_id"), longValue(node, "user_id"))
 
+/**
+ * 从 HTTP JSON 响应中解析 [User] 对象。
+ *
+ * 兼容新旧版本的 HTTP 响应格式：新版使用 `profile` 字段（嵌入式 JSON），
+ * 旧版使用 `profile_json` 字段（原始字节或 base64），统一归一化为 `profileJson`。
+ *
+ * @param node HTTP 响应中的 JSON 节点
+ * @return 解析后的 User 对象
+ */
 fun userFromHttp(node: JsonNode): User {
     val profile = when {
-        // Older/newer HTTP responses may expose parsed profile content or the raw *_json bytes.
-        // Normalizing both into profileJson keeps the public model transport-agnostic.
+        // 新/旧 HTTP 响应可能暴露解析后的 profile 内容或原始的 *_json 字节。
+        // 将两者都归一化为 profileJson 使公开模型与传输无关。
         node.has("profile") -> mapper.writeValueAsBytes(node.path("profile"))
         node.has("profile_json") -> bytesValue(node, "profile_json")
         else -> byteArrayOf()
@@ -112,6 +225,12 @@ fun userFromHttp(node: JsonNode): User {
     )
 }
 
+/**
+ * 从 HTTP JSON 响应中解析 [Message] 对象。
+ *
+ * @param node HTTP 响应中的 JSON 节点
+ * @return 解析后的 Message 对象
+ */
 fun messageFromHttp(node: JsonNode): Message = Message(
     recipient = userRefNode(node.path("recipient")),
     nodeId = longValue(node, "node_id"),
@@ -121,6 +240,12 @@ fun messageFromHttp(node: JsonNode): Message = Message(
     createdAtHlc = text(node, "created_at_hlc").ifEmpty { text(node, "created_at") }
 )
 
+/**
+ * 从 HTTP JSON 响应中解析 [Attachment] 对象。
+ *
+ * @param node HTTP 响应中的 JSON 节点
+ * @return 解析后的 Attachment 对象
+ */
 fun attachmentFromHttp(node: JsonNode): Attachment = Attachment(
     owner = userRefNode(node.path("owner")),
     subject = userRefNode(node.path("subject")),
@@ -131,6 +256,12 @@ fun attachmentFromHttp(node: JsonNode): Attachment = Attachment(
     originNodeId = longValue(node, "origin_node_id")
 )
 
+/**
+ * 从 HTTP JSON 响应中解析 [UserMetadata] 对象。
+ *
+ * @param node HTTP 响应中的 JSON 节点
+ * @return 解析后的 UserMetadata 对象
+ */
 fun userMetadataFromHttp(node: JsonNode): UserMetadata = UserMetadata(
     owner = userRefNode(node.path("owner")),
     key = text(node, "key"),
@@ -141,6 +272,15 @@ fun userMetadataFromHttp(node: JsonNode): UserMetadata = UserMetadata(
     originNodeId = longValue(node, "origin_node_id")
 )
 
+/**
+ * 将 [Attachment] 转换为 [BlacklistEntry]。
+ *
+ * 黑名单使用 [AttachmentType.USER_BLACKLIST] 类型的附件实现，
+ * 此函数从附件中提取相关信息构造黑名单条目。
+ *
+ * @param attachment 用户黑名单类型的附件
+ * @return 转换后的黑名单条目
+ */
 fun blacklistEntryFromAttachment(attachment: Attachment): BlacklistEntry = BlacklistEntry(
     owner = attachment.owner,
     blocked = attachment.subject,
@@ -149,6 +289,12 @@ fun blacklistEntryFromAttachment(attachment: Attachment): BlacklistEntry = Black
     originNodeId = attachment.originNodeId
 )
 
+/**
+ * 从 HTTP JSON 响应中解析 [ClusterNode] 对象。
+ *
+ * @param node HTTP 响应中的 JSON 节点
+ * @return 解析后的 ClusterNode 对象
+ */
 fun clusterNodeFromHttp(node: JsonNode): ClusterNode = ClusterNode(
     nodeId = longValue(node, "node_id"),
     isLocal = boolValue(node, "is_local"),
@@ -156,6 +302,12 @@ fun clusterNodeFromHttp(node: JsonNode): ClusterNode = ClusterNode(
     source = text(node, "source")
 )
 
+/**
+ * 从 HTTP JSON 响应中解析 [LoggedInUser] 对象。
+ *
+ * @param node HTTP 响应中的 JSON 节点
+ * @return 解析后的 LoggedInUser 对象
+ */
 fun loggedInUserFromHttp(node: JsonNode): LoggedInUser = LoggedInUser(
     nodeId = longValue(node, "node_id"),
     userId = longValue(node, "user_id"),
@@ -163,10 +315,26 @@ fun loggedInUserFromHttp(node: JsonNode): LoggedInUser = LoggedInUser(
     loginName = text(node, "login_name")
 )
 
-// HTTP handlers are inconsistent between bare arrays and {"items": [...]} envelopes, so the
-// adapter centralizes that tolerance instead of scattering shape checks across callers.
+// HTTP 处理程序在裸数组和 {"items": [...]} 封装之间存在不一致，
+// 因此适配器集中处理这种容忍性，而不是将形状检查分散到调用方。
+
+/**
+ * 从 JSON 节点中提取条目列表节点。
+ *
+ * 兼容不同格式的 HTTP 响应：有些返回裸数组，有些返回 `{"items": [...]}` 封装格式。
+ *
+ * @param node HTTP 响应节点
+ * @param field 封装格式中的字段名
+ * @return 如果是数组则直接返回，否则返回指定字段的子节点
+ */
 fun itemsNode(node: JsonNode, field: String): JsonNode = if (node.isArray) node else node.path(field)
 
+/**
+ * 从 HTTP JSON 响应中解析 [UserMetadataScanResult] 对象。
+ *
+ * @param node HTTP 响应中的 JSON 节点
+ * @return 解析后的 UserMetadataScanResult 对象
+ */
 fun userMetadataScanResultFromHttp(node: JsonNode): UserMetadataScanResult {
     val items = itemsNode(node, "items").map(::userMetadataFromHttp)
     return UserMetadataScanResult(
@@ -176,28 +344,78 @@ fun userMetadataScanResultFromHttp(node: JsonNode): UserMetadataScanResult {
     )
 }
 
+// === Proto 转换函数 ===
+
+/**
+ * 将 [UserRef] 转换为 Proto 的 Client.UserRef。
+ *
+ * @param value Kotlin 侧的用户引用
+ * @return Proto 侧的用户引用
+ */
 fun userRefToProto(value: UserRef): Client.UserRef = Client.UserRef.newBuilder().setNodeId(value.nodeId).setUserId(value.userId).build()
 
+/**
+ * 将 Proto 的 Client.UserRef 转换为 [UserRef]。
+ *
+ * @param value Proto 侧的用户引用，为 null 时返回零值
+ * @return Kotlin 侧的用户引用
+ */
 fun userRefFromProto(value: Client.UserRef?): UserRef = if (value == null) UserRef(0, 0) else UserRef(value.nodeId, value.userId)
 
+/**
+ * 将 [SessionRef] 转换为 Proto 的 Client.SessionRef。
+ *
+ * @param value Kotlin 侧的会话引用
+ * @return Proto 侧的会话引用
+ */
 fun sessionRefToProto(value: SessionRef): Client.SessionRef = Client.SessionRef.newBuilder().setServingNodeId(value.servingNodeId).setSessionId(value.sessionId).build()
 
+/**
+ * 将 Proto 的 Client.SessionRef 转换为 [SessionRef]。
+ *
+ * @param value Proto 侧的会话引用，为 null 时返回零值
+ * @return Kotlin 侧的会话引用
+ */
 fun sessionRefFromProto(value: Client.SessionRef?): SessionRef = if (value == null) SessionRef(0, "") else SessionRef(value.servingNodeId, value.sessionId)
 
+/**
+ * 将 [MessageCursor] 转换为 Proto 的 Client.MessageCursor。
+ *
+ * @param value Kotlin 侧的消息游标
+ * @return Proto 侧的消息游标
+ */
 fun cursorToProto(value: MessageCursor): Client.MessageCursor = Client.MessageCursor.newBuilder().setNodeId(value.nodeId).setSeq(value.seq).build()
 
+/**
+ * 将 [DeliveryMode] 转换为 Proto 的 Client.ClientDeliveryMode。
+ *
+ * @param value Kotlin 侧的投递模式
+ * @return Proto 侧的投递模式枚举
+ */
 fun deliveryModeToProto(value: DeliveryMode): Client.ClientDeliveryMode = when (value) {
     DeliveryMode.BEST_EFFORT -> Client.ClientDeliveryMode.CLIENT_DELIVERY_MODE_BEST_EFFORT
     DeliveryMode.ROUTE_RETRY -> Client.ClientDeliveryMode.CLIENT_DELIVERY_MODE_ROUTE_RETRY
     DeliveryMode.UNSPECIFIED -> Client.ClientDeliveryMode.CLIENT_DELIVERY_MODE_UNSPECIFIED
 }
 
+/**
+ * 将 Proto 的 Client.ClientDeliveryMode 转换为 [DeliveryMode]。
+ *
+ * @param value Proto 侧的投递模式枚举
+ * @return Kotlin 侧的投递模式
+ */
 fun deliveryModeFromProto(value: Client.ClientDeliveryMode): DeliveryMode = when (value) {
     Client.ClientDeliveryMode.CLIENT_DELIVERY_MODE_BEST_EFFORT -> DeliveryMode.BEST_EFFORT
     Client.ClientDeliveryMode.CLIENT_DELIVERY_MODE_ROUTE_RETRY -> DeliveryMode.ROUTE_RETRY
     else -> DeliveryMode.UNSPECIFIED
 }
 
+/**
+ * 将 [AttachmentType] 转换为 Proto 的 Client.AttachmentType。
+ *
+ * @param value Kotlin 侧的附件类型，为 null 时返回 UNSPECIFIED
+ * @return Proto 侧的附件类型枚举
+ */
 fun attachmentTypeToProto(value: AttachmentType?): Client.AttachmentType = when (value) {
     AttachmentType.CHANNEL_MANAGER -> Client.AttachmentType.ATTACHMENT_TYPE_CHANNEL_MANAGER
     AttachmentType.CHANNEL_WRITER -> Client.AttachmentType.ATTACHMENT_TYPE_CHANNEL_WRITER
@@ -206,8 +424,18 @@ fun attachmentTypeToProto(value: AttachmentType?): Client.AttachmentType = when 
     null -> Client.AttachmentType.ATTACHMENT_TYPE_UNSPECIFIED
 }
 
-// The public Kotlin model has no UNKNOWN attachment type, so forward-incompatible proto enum
-// values are collapsed to a concrete default instead of surfacing null through the API.
+// 公开的 Kotlin 模型没有 UNKNOWN 附件类型，因此向前不兼容的 proto 枚举值
+// 会被折叠为具体默认值，而不是通过 API 暴露 null。
+
+/**
+ * 将 Proto 的 Client.AttachmentType 转换为 [AttachmentType]。
+ *
+ * 不兼容的 Proto 枚举值会被折叠为 [AttachmentType.CHANNEL_MANAGER]，
+ * 而不是返回 null。
+ *
+ * @param value Proto 侧的附件类型枚举
+ * @return Kotlin 侧的附件类型
+ */
 fun attachmentTypeFromProto(value: Client.AttachmentType): AttachmentType = when (value) {
     Client.AttachmentType.ATTACHMENT_TYPE_CHANNEL_MANAGER -> AttachmentType.CHANNEL_MANAGER
     Client.AttachmentType.ATTACHMENT_TYPE_CHANNEL_WRITER -> AttachmentType.CHANNEL_WRITER
@@ -216,6 +444,12 @@ fun attachmentTypeFromProto(value: Client.AttachmentType): AttachmentType = when
     else -> AttachmentType.CHANNEL_MANAGER
 }
 
+/**
+ * 将 Proto 的 Client.User 转换为 [User]。
+ *
+ * @param value Proto 侧的用户，为 null 时返回空用户
+ * @return Kotlin 侧的用户
+ */
 fun userFromProto(value: Client.User?): User = if (value == null) User(0, 0, "", "") else User(
     nodeId = value.nodeId,
     userId = value.userId,
@@ -229,6 +463,12 @@ fun userFromProto(value: Client.User?): User = if (value == null) User(0, 0, "",
     loginName = value.loginName
 )
 
+/**
+ * 将 Proto 的 Client.Message 转换为 [Message]。
+ *
+ * @param value Proto 侧的消息，为 null 时返回空消息
+ * @return Kotlin 侧的消息
+ */
 fun messageFromProto(value: Client.Message?): Message = if (value == null) Message(UserRef(0, 0), 0, 0, UserRef(0, 0), byteArrayOf(), "") else Message(
     recipient = userRefFromProto(value.recipient),
     nodeId = value.nodeId,
@@ -238,6 +478,12 @@ fun messageFromProto(value: Client.Message?): Message = if (value == null) Messa
     createdAtHlc = value.createdAtHlc
 )
 
+/**
+ * 将 Proto 的 Client.Packet 转换为 [Packet]。
+ *
+ * @param value Proto 侧的数据包
+ * @return Kotlin 侧的数据包
+ */
 fun packetFromProto(value: Client.Packet): Packet = Packet(
     packetId = requireUnsigned(value.packetId, "packet_id"),
     sourceNodeId = value.sourceNodeId,
@@ -249,6 +495,12 @@ fun packetFromProto(value: Client.Packet): Packet = Packet(
     targetSession = sessionRefFromProto(value.targetSession)
 )
 
+/**
+ * 将 Proto 的 Client.TransientAccepted 转换为 [RelayAccepted]。
+ *
+ * @param value Proto 侧的中继接受确认
+ * @return Kotlin 侧的中继接受确认
+ */
 fun relayAcceptedFromProto(value: Client.TransientAccepted): RelayAccepted = RelayAccepted(
     packetId = requireUnsigned(value.packetId, "packet_id"),
     sourceNodeId = value.sourceNodeId,
@@ -258,6 +510,12 @@ fun relayAcceptedFromProto(value: Client.TransientAccepted): RelayAccepted = Rel
     targetSession = sessionRefFromProto(value.targetSession)
 )
 
+/**
+ * 将 Proto 的 Client.Attachment 转换为 [Attachment]。
+ *
+ * @param value Proto 侧的附件
+ * @return Kotlin 侧的附件
+ */
 fun attachmentFromProto(value: Client.Attachment): Attachment = Attachment(
     owner = userRefFromProto(value.owner),
     subject = userRefFromProto(value.subject),
@@ -268,6 +526,12 @@ fun attachmentFromProto(value: Client.Attachment): Attachment = Attachment(
     originNodeId = value.originNodeId
 )
 
+/**
+ * 将 Proto 的 Client.UserMetadata 转换为 [UserMetadata]。
+ *
+ * @param value Proto 侧的元数据，为 null 时返回空元数据
+ * @return Kotlin 侧的元数据
+ */
 fun userMetadataFromProto(value: Client.UserMetadata?): UserMetadata = if (value == null) UserMetadata(UserRef(0, 0), "") else UserMetadata(
     owner = userRefFromProto(value.owner),
     key = value.key,
@@ -278,6 +542,12 @@ fun userMetadataFromProto(value: Client.UserMetadata?): UserMetadata = if (value
     originNodeId = value.originNodeId
 )
 
+/**
+ * 将 Proto 的 Client.Event 转换为 [Event]。
+ *
+ * @param value Proto 侧的事件
+ * @return Kotlin 侧的事件
+ */
 fun eventFromProto(value: Client.Event): Event = Event(
     sequence = value.sequence,
     eventId = value.eventId,
@@ -290,24 +560,55 @@ fun eventFromProto(value: Client.Event): Event = Event(
     eventJson = value.eventJson.toByteArray()
 )
 
+/**
+ * 将 Proto 的 Client.ClusterNode 转换为 [ClusterNode]。
+ *
+ * @param value Proto 侧的集群节点
+ * @return Kotlin 侧的集群节点
+ */
 fun clusterNodeFromProto(value: Client.ClusterNode): ClusterNode = ClusterNode(value.nodeId, value.isLocal, value.configuredUrl, value.source)
 
+/**
+ * 将 Proto 的 Client.LoggedInUser 转换为 [LoggedInUser]。
+ *
+ * @param value Proto 侧的已登录用户
+ * @return Kotlin 侧的已登录用户
+ */
 fun loggedInUserFromProto(value: Client.LoggedInUser): LoggedInUser =
     LoggedInUser(value.nodeId, value.userId, value.username, value.loginName)
 
+/**
+ * 将 Proto 的 Client.ResolveUserSessionsResponse 转换为 [ResolvedUserSessions]。
+ *
+ * 在线状态按服务节点分组，而 itemsList 维护每个会话的传输详情。
+ *
+ * @param value Proto 侧的会话解析响应
+ * @return Kotlin 侧的会话解析结果
+ */
 fun resolvedUserSessionsFromProto(value: Client.ResolveUserSessionsResponse): ResolvedUserSessions = ResolvedUserSessions(
     user = userRefFromProto(value.user),
-    // Presence is grouped by serving node, while itemsList keeps per-session transport detail.
     presence = value.presenceList.map { ResolvedUserSessions.OnlineNodePresence(it.servingNodeId, it.sessionCount, it.transportHint) },
     sessions = value.itemsList.map { ResolvedUserSessions.ResolvedSession(sessionRefFromProto(it.session), it.transport, it.transientCapable) }
 )
 
+/**
+ * 将 Proto 的 Client.ScanUserMetadataResponse 转换为 [UserMetadataScanResult]。
+ *
+ * @param value Proto 侧的扫描响应
+ * @return Kotlin 侧的扫描结果
+ */
 fun userMetadataScanResultFromProto(value: Client.ScanUserMetadataResponse): UserMetadataScanResult = UserMetadataScanResult(
     items = value.itemsList.map(::userMetadataFromProto),
     count = value.count,
     nextAfter = value.nextAfter
 )
 
+/**
+ * 将 Proto 的 Client.OperationsStatus 转换为 [OperationsStatus]。
+ *
+ * @param value Proto 侧的运维状态
+ * @return Kotlin 侧的运维状态
+ */
 fun operationsStatusFromProto(value: Client.OperationsStatus): OperationsStatus = OperationsStatus(
     nodeId = value.nodeId,
     messageWindowSize = value.messageWindowSize,
@@ -355,12 +656,42 @@ fun operationsStatusFromProto(value: Client.OperationsStatus): OperationsStatus 
     eventLogTrim = OperationsStatus.EventLogTrimStatus(value.eventLogTrim.trimmedTotal, value.eventLogTrim.lastTrimmedAt)
 )
 
+/**
+ * 将 Proto 的 Client.LoginResponse 转换为 [LoginInfo]。
+ *
+ * @param value Proto 侧的登录响应
+ * @return Kotlin 侧的登录信息
+ */
 fun loginInfoFromProto(value: Client.LoginResponse): LoginInfo = LoginInfo(userFromProto(value.user), value.protocolVersion, sessionRefFromProto(value.sessionRef))
 
+/**
+ * 将 Proto 的 Client.DeleteUserResponse 转换为 [DeleteUserResult]。
+ *
+ * @param value Proto 侧的删除用户响应
+ * @return Kotlin 侧的删除用户结果
+ */
 fun deleteUserResultFromProto(value: Client.DeleteUserResponse): DeleteUserResult = DeleteUserResult(value.status, userRefFromProto(value.user))
 
+/**
+ * 将可选的字符串值包装为 Proto 的 StringField。
+ *
+ * @param value 可选的字符串值
+ * @return 如果值非 null，返回对应的 Proto StringField；否则返回 null
+ */
 fun optionalStringField(value: String?): Client.StringField? = value?.let { Client.StringField.newBuilder().setValue(it).build() }
 
+/**
+ * 将可选的密码输入包装为 Proto 的 StringField（使用密码的传输值）。
+ *
+ * @param value 可选的密码输入
+ * @return 如果值非 null，返回对应的 Proto StringField；否则返回 null
+ */
 fun optionalPasswordField(value: PasswordInput?): Client.StringField? = value?.let { Client.StringField.newBuilder().setValue(it.wireValue()).build() }
 
+/**
+ * 将可选的字节数组包装为 Proto 的 BytesField。
+ *
+ * @param value 可选的字节数组
+ * @return 如果值非 null，返回对应的 Proto BytesField；否则返回 null
+ */
 fun optionalBytesField(value: ByteArray?): Client.BytesField? = value?.let { Client.BytesField.newBuilder().setValue(ByteString.copyFrom(it)).build() }
