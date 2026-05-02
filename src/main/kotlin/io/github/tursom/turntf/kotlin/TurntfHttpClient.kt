@@ -267,19 +267,34 @@ class TurntfHttpClient(
     }
 
     /**
-     * 列出指定目标用户的持久化消息。
+     * 列出指定目标用户的持久化消息，可选地按发送者（peer）过滤。
+     *
+     * target 支持 nodeId=0, userId=0 作为"当前用户"的 sentinel 值。
      *
      * @param token 身份验证令牌
      * @param target 目标用户
      * @param limit 返回消息的最大数量（0 表示服务端默认限制）
+     * @param peerNodeId 可选的发送者节点 ID，与 peerUserId 同时提供时按 session 过滤
+     * @param peerUserId 可选的发送者用户 ID，与 peerNodeId 同时提供时按 session 过滤
      * @return 消息列表
-     * @throws IllegalArgumentException 如果目标用户引用无效
      * @throws ConnectionError 如果网络请求失败
      * @throws ProtocolError 如果服务器返回意外状态码
      */
-    suspend fun listMessages(token: String, target: UserRef, limit: Int = 0): List<Message> {
-        validateUserRef(target, "target")
-        val path = if (limit > 0) "/nodes/${target.nodeId}/users/${target.userId}/messages?limit=$limit" else "/nodes/${target.nodeId}/users/${target.userId}/messages"
+    suspend fun listMessages(token: String, target: UserRef, limit: Int = 0, peerNodeId: Long? = null, peerUserId: Long? = null): List<Message> {
+        val path = buildString {
+            append("/nodes/${target.nodeId}/users/${target.userId}/messages")
+            val params = buildList {
+                if (limit > 0) add("limit=$limit")
+                if (peerNodeId != null && peerUserId != null) {
+                    add("peer_node_id=$peerNodeId")
+                    add("peer_user_id=$peerUserId")
+                }
+            }
+            if (params.isNotEmpty()) {
+                append("?")
+                append(params.joinToString("&"))
+            }
+        }
         val response = doJson("GET", path, token, null, setOf(200))
         return itemsNode(response, "items").map { messageFromHttp(it) }
     }

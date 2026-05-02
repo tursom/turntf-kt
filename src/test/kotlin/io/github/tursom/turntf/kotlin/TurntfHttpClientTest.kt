@@ -62,6 +62,12 @@ class TurntfHttpClientTest {
                         "GET /nodes/4096/users/1025/messages?limit=20" -> {
                             json(200, """{"items":[{"recipient":{"node_id":4096,"user_id":1025},"node_id":4096,"seq":3,"sender":{"node_id":4096,"user_id":1},"body":"/wA=","created_at":"hlc1"}]}""")
                         }
+                        "GET /nodes/4096/users/1025/messages?limit=20&peer_node_id=100&peer_user_id=200" -> {
+                            json(200, """{"items":[{"recipient":{"node_id":4096,"user_id":1025},"node_id":4096,"seq":3,"sender":{"node_id":100,"user_id":200},"body":"/wA=","created_at":"hlc1"}]}""")
+                        }
+                        "GET /nodes/0/users/0/messages" -> {
+                            json(200, """{"items":[]}""")
+                        }
                         "POST /nodes/4096/users/1025/messages" -> {
                             val body = mapper.readTree(request.body.readUtf8())
                             assertEquals("/wA=", body.path("body").asText())
@@ -107,6 +113,15 @@ class TurntfHttpClientTest {
             val items = client.listMessages(token, UserRef(4096, 1025), 20)
             assertEquals(1, items.size)
             assertContentEquals(byteArrayOf(0xff.toByte(), 0x00), items.first().body)
+
+            val peerItems = client.listMessages(token, UserRef(4096, 1025), 20, peerNodeId = 100, peerUserId = 200)
+            assertEquals(1, peerItems.size)
+            assertEquals(100, peerItems.first().sender.nodeId)
+            assertEquals(200, peerItems.first().sender.userId)
+
+            // UserRef(0, 0) 作为"当前用户"sentinel，不再被 validateUserRef 拦截
+            val currentUserItems = client.listMessages(token, UserRef(0, 0))
+            assertEquals(0, currentUserItems.size)
 
             val created = client.postMessage(token, UserRef(4096, 1025), byteArrayOf(0xff.toByte(), 0x00))
             assertEquals(4, created.seq)
