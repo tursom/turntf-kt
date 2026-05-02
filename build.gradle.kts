@@ -35,6 +35,7 @@ sourceSets {
         proto {
             srcDir("proto")
             include("client.proto")
+            include("relay.proto")
         }
     }
 }

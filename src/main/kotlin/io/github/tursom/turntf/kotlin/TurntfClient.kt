@@ -74,6 +74,17 @@ class TurntfClient(config: Config) {
      */
     val http = TurntfHttpClient(this.config.baseUrl, httpClient)
 
+    /**
+     * Relay 连接管理器，提供用户间的点对点实时传输通道。
+     *
+     * 支持三种可靠性模式：BestEffort、AtLeastOnce、ReliableOrdered。
+     * 入站连接通过 [Relay.onConnection] 注册处理器接收。
+     *
+     * @see Relay
+     * @see RelayConnection
+     */
+    val relay = Relay(this)
+
     private val runtimeDispatcher: CoroutineDispatcher = Dispatchers.IO
     // 所有经过认证的协议帧通过单一线程处理，以确保消息持久化、
     // ACK 发送、待处理 RPC 完成和事件发布按服务器发送顺序执行。
@@ -1132,7 +1143,13 @@ class TurntfClient(config: Config) {
                     }
                     _events.tryEmit(ClientEvent.MessageReceived(message))
                 }
-                Client.ServerEnvelope.BodyCase.PACKET_PUSHED -> _events.tryEmit(ClientEvent.PacketReceived(packetFromProto(env.packetPushed.packet)))
+                Client.ServerEnvelope.BodyCase.PACKET_PUSHED -> {
+                    val packet = packetFromProto(env.packetPushed.packet)
+                    // 先尝试 relay 帧分发，非 relay 包才投递给用户
+                    if (!relay.handlePacket(packet)) {
+                        _events.tryEmit(ClientEvent.PacketReceived(packet))
+                    }
+                }
                 Client.ServerEnvelope.BodyCase.SEND_MESSAGE_RESPONSE -> {
                     val requestId = requireUnsigned(env.sendMessageResponse.requestId, "request_id")
                     when (env.sendMessageResponse.bodyCase) {
