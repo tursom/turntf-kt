@@ -1,5 +1,6 @@
 package io.github.tursom.turntf.kotlin
 
+import com.fasterxml.jackson.databind.JsonNode
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.mindrot.jbcrypt.BCrypt
@@ -244,14 +245,80 @@ data class User(
 )
 
 /**
+ * 控制普通用户是否能在 `/users` / `list_users` 中看见目标 owner 的系统 metadata key。
+ *
+ * 该 key 只接受布尔值，且不允许设置 `expiresAt`。
+ */
+const val USER_METADATA_KEY_VISIBLE_TO_OTHERS: String = "system.visible_to_others"
+
+/**
+ * HTTP JSON `typed_value` 的强类型视图。
+ *
+ * 服务端只在 HTTP JSON 接口上暴露该视图；WebSocket / protobuf 仍只传输原始字节，
+ * 因此通过 [TurntfClient] 返回的 [UserMetadata] 会始终让 [UserMetadata.typedValue] 保持为 `null`。
+ *
+ * [UserMetadata.value] 仍然是唯一的底层真值，`typedValue` 只是 HTTP 侧附带的解释结果。
+ * 其中 [Bytes] 主要用于写请求，服务端响应在无法稳定解释原始字节时可能不会回显 typed 视图。
+ */
+sealed interface UserMetadataTypedValue {
+    /** 服务端 HTTP `typed_value.kind` 原始字符串。 */
+    val kind: String
+
+    /**
+     * 将 metadata 当作裸字节写入 HTTP `typed_value.bytes_value`。
+     *
+     * 这是一个“只保证写入”的视图：服务端响应若无法稳定把原始字节解释成 JSON，
+     * 很可能不会回填 [UserMetadata.typedValue]。
+     */
+    data class Bytes(val value: ByteArray) : UserMetadataTypedValue {
+        override val kind: String = "bytes"
+    }
+
+    /** 将 metadata 解释为布尔值，并在 HTTP 层编码成原始字节 `true` / `false`。 */
+    data class Bool(val value: Boolean) : UserMetadataTypedValue {
+        override val kind: String = "bool"
+    }
+
+    /** 将 metadata 解释为字符串，并在 HTTP 层编码成 JSON string。 */
+    data class StringValue(val value: String) : UserMetadataTypedValue {
+        override val kind: String = "string"
+    }
+
+    /**
+     * 将 metadata 解释为 JSON number。
+     *
+     * [literal] 保留调用方提供的数值字面量文本，避免在 SDK 内部引入精度损失或格式改写。
+     * 真正的 JSON number 合法性会在 HTTP 编码阶段校验。
+     */
+    data class NumberValue(val literal: String) : UserMetadataTypedValue {
+        override val kind: String = "number"
+    }
+
+    /**
+     * 将 metadata 解释为任意 JSON 值。
+     *
+     * 最常见的是对象或数组，但 `null` 也属于合法 JSON。
+     */
+    data class JsonValue(val value: JsonNode) : UserMetadataTypedValue {
+        override val kind: String = "json"
+    }
+}
+
+/**
  * 用户私有的元数据条目，同时用于 HTTP 和 WebSocket API。
  *
  * SDK 始终将 [value] 暴露为原始字节（ByteArray），
  * 即使 HTTP 传输层将其序列化为 base64。这使得调用者在切换传输协议时无需修改应用层模型。
  *
+ * owner 现支持所有非系统保留用户，包括普通用户、管理员和 `channel`。
+ * 当通过 HTTP JSON 读取 metadata 时，服务端在能够稳定解释原始字节的情况下，
+ * 还会额外返回 [typedValue] 视图；但 WebSocket / protobuf 永远只传输 [value]，
+ * 因此 [typedValue] 在 WS RPC 结果里始终为 `null`。
+ *
  * @param owner 元数据所属的用户引用
  * @param key 元数据键名
  * @param value 元数据值（原始字节）
+ * @param typedValue HTTP JSON 附带的强类型解释视图；为 null 表示当前原始字节没有稳定 typed 解释，或本次结果来自 WebSocket/protobuf
  * @param updatedAt 最后更新时间（RFC3339 格式）
  * @param deletedAt 删除时间（如果已删除，RFC3339 格式）
  * @param expiresAt 过期时间（如果设置了过期，RFC3339 格式）
@@ -261,6 +328,7 @@ data class UserMetadata(
     val owner: UserRef,
     val key: String,
     val value: ByteArray = byteArrayOf(),
+    val typedValue: UserMetadataTypedValue? = null,
     val updatedAt: String = "",
     val deletedAt: String = "",
     val expiresAt: String = "",

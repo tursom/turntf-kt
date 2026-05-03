@@ -193,6 +193,10 @@ class TurntfHttpClient(
     /**
      * 读取指定用户的一条私有元数据。
      *
+     * owner 现在可以是任意非系统保留用户，包括 `channel`。
+     * 返回值中的 [UserMetadata.value] 始终是原始字节；如果服务端能够稳定解释这些字节，
+     * 还会额外填充 [UserMetadata.typedValue]。
+     *
      * @param token 身份验证令牌
      * @param owner 元数据所属用户
      * @param key 元数据键名
@@ -212,6 +216,8 @@ class TurntfHttpClient(
      *
      * REST API 将 [value] 作为 base64 编码在 JSON 中传输，但调用者始终使用原始字节，
      * 使此方法与 WebSocket/proto 模型保持一致。
+     * 当 `key == USER_METADATA_KEY_VISIBLE_TO_OTHERS` 时，HTTP raw 值必须是 `true` / `false`，
+     * 且不允许携带 `expiresAt`。
      *
      * @param token 身份验证令牌
      * @param owner 元数据所属用户
@@ -224,12 +230,52 @@ class TurntfHttpClient(
      * @throws ProtocolError 如果服务器返回意外状态码
      */
     suspend fun upsertUserMetadata(token: String, owner: UserRef, key: String, value: ByteArray, expiresAt: String? = null): UserMetadata {
+        return upsertUserMetadataInternal(token, owner, key, value = value, expiresAt = expiresAt)
+    }
+
+    /**
+     * 使用 HTTP `typed_value` 视图创建或替换一条私有元数据。
+     *
+     * 这是 HTTP 专属能力：SDK 会把 [typedValue] 序列化成 REST `typed_value` 结构，
+     * 服务端再按新的 metadata 语义转成底层原始字节保存。
+     * 返回值里的 [UserMetadata.value] 仍然是唯一真值，而 [UserMetadata.typedValue] 是服务端重新推导出的解释结果，
+     * 因此它不一定与请求时的 kind 完全一致，例如 `Bytes` 请求在响应里可能拿不到 typed 视图。
+     *
+     * owner 现在可以是任意非系统保留用户，包括 `channel`。
+     * 当 `key == USER_METADATA_KEY_VISIBLE_TO_OTHERS` 时，只允许 [UserMetadataTypedValue.Bool]，
+     * 且不允许携带 `expiresAt`。
+     *
+     * @param token 身份验证令牌
+     * @param owner 元数据所属用户
+     * @param key 元数据键名
+     * @param typedValue 元数据的 HTTP typed 视图
+     * @param expiresAt 可选的过期时间（RFC3339 格式）
+     * @return 创建或更新后的元数据条目
+     * @throws IllegalArgumentException 如果参数无效
+     * @throws ConnectionError 如果网络请求失败
+     * @throws ProtocolError 如果服务器返回意外状态码
+     */
+    suspend fun upsertUserMetadata(
+        token: String,
+        owner: UserRef,
+        key: String,
+        typedValue: UserMetadataTypedValue,
+        expiresAt: String? = null
+    ): UserMetadata {
+        return upsertUserMetadataInternal(token, owner, key, typedValue = typedValue, expiresAt = expiresAt)
+    }
+
+    private suspend fun upsertUserMetadataInternal(
+        token: String,
+        owner: UserRef,
+        key: String,
+        value: ByteArray? = null,
+        typedValue: UserMetadataTypedValue? = null,
+        expiresAt: String? = null
+    ): UserMetadata {
         validateUserRef(owner, "owner")
         validateUserMetadataKey(key, "key")
-        val payload = mapper.createObjectNode().apply {
-            put("value", value)
-            expiresAt?.let { put("expires_at", it) }
-        }
+        val payload = buildUserMetadataPayload(key, value, typedValue, expiresAt)
         return userMetadataFromHttp(doJson("PUT", "/nodes/${owner.nodeId}/users/${owner.userId}/metadata/$key", token, payload, setOf(200, 201)))
     }
 
@@ -255,6 +301,8 @@ class TurntfHttpClient(
      *
      * 支持按前缀过滤、游标分页和数量限制。
      * 使用服务端的 `prefix` / `after` / `limit` 游标语义。
+     * 返回条目中的 [UserMetadata.typedValue] 仅对 HTTP JSON 结果有效；
+     * 若某项原始字节无法稳定解释，则该字段会保持为 `null`。
      *
      * @param token 身份验证令牌
      * @param owner 元数据所属用户
@@ -288,6 +336,62 @@ class TurntfHttpClient(
             }
         }
         return userMetadataScanResultFromHttp(doJson("GET", path, token, null, setOf(200)))
+    }
+
+    /**
+     * 组装 HTTP metadata 写请求。
+     *
+     * 该 helper 集中维护 Kotlin SDK 对 `value` / `typed_value` 二选一约束的实现，
+     * 并在发出请求前同步执行系统 metadata key 的本地校验，
+     * 使 raw bytes 与 typed_value 两条公开 API 共用同一套语义。
+     */
+    private fun buildUserMetadataPayload(
+        key: String,
+        value: ByteArray?,
+        typedValue: UserMetadataTypedValue?,
+        expiresAt: String?
+    ): JsonNode {
+        require((value == null) != (typedValue == null)) { "exactly one of value or typedValue must be provided" }
+        validateUserMetadataHttpWrite(key, value, typedValue, expiresAt)
+        return mapper.createObjectNode().apply {
+            value?.let { put("value", it) }
+            typedValue?.let { set<JsonNode>("typed_value", userMetadataTypedValueToHttp(it)) }
+            expiresAt?.let { put("expires_at", it) }
+        }
+    }
+
+    /**
+     * 对 HTTP metadata 写请求执行服务端已公开的新语义校验。
+     *
+     * 目前只有 `system.visible_to_others` 需要特殊处理：
+     * - 仅允许布尔值
+     * - 不允许 TTL
+     *
+     * WebSocket/protobuf 仍允许业务层直接发送原始字节，因此这段校验被严格限定在 HTTP 客户端内部。
+     */
+    private fun validateUserMetadataHttpWrite(
+        key: String,
+        value: ByteArray?,
+        typedValue: UserMetadataTypedValue?,
+        expiresAt: String?
+    ) {
+        if (key != USER_METADATA_KEY_VISIBLE_TO_OTHERS) {
+            return
+        }
+        require(expiresAt.isNullOrBlank()) { "metadata key $USER_METADATA_KEY_VISIBLE_TO_OTHERS does not allow expiresAt" }
+        when {
+            typedValue != null -> require(typedValue is UserMetadataTypedValue.Bool) {
+                "metadata key $USER_METADATA_KEY_VISIBLE_TO_OTHERS requires UserMetadataTypedValue.Bool"
+            }
+            value != null -> require(isVisibilityMetadataRawValue(value)) {
+                "metadata key $USER_METADATA_KEY_VISIBLE_TO_OTHERS requires raw bytes \"true\" or \"false\""
+            }
+        }
+    }
+
+    private fun isVisibilityMetadataRawValue(value: ByteArray): Boolean = when (value.decodeToString().trim()) {
+        "true", "false" -> true
+        else -> false
     }
 
     /**

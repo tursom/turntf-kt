@@ -24,6 +24,7 @@ import io.github.tursom.turntf.kotlin.SessionRef
 import io.github.tursom.turntf.kotlin.Subscription
 import io.github.tursom.turntf.kotlin.User
 import io.github.tursom.turntf.kotlin.UserMetadata
+import io.github.tursom.turntf.kotlin.UserMetadataTypedValue
 import io.github.tursom.turntf.kotlin.UserMetadataScanResult
 import io.github.tursom.turntf.kotlin.UserListFilter
 import io.github.tursom.turntf.kotlin.UserRef
@@ -253,6 +254,88 @@ fun boolValue(node: JsonNode, field: String): Boolean = node.path(field).takeUnl
  */
 fun bytesValue(node: JsonNode, field: String): ByteArray = node.path(field).takeUnless { it.isMissingNode || it.isNull }?.binaryValue() ?: byteArrayOf()
 
+private fun fieldNode(node: JsonNode, field: String): JsonNode? = if (node.has(field)) node.get(field) else null
+
+/**
+ * 校验并标准化 HTTP metadata 的 number 字面量。
+ *
+ * HTTP `typed_value.number_value` 允许任意合法 JSON number，不能在 SDK 内部被强制转换成 Double/Long，
+ * 否则会丢失精度或改变科学计数法表示。因此这里保留字面量文本，只负责验证它确实是单个 JSON number。
+ *
+ * @param raw 调用方提供的原始 number 文本
+ * @param field 错误消息中使用的字段名
+ * @return 标准化后的 JSON number 文本
+ * @throws IllegalArgumentException 如果输入为空、不是合法 JSON，或不是 number
+ */
+fun normalizeMetadataNumberLiteral(raw: String, field: String): String {
+    val trimmed = raw.trim()
+    require(trimmed.isNotEmpty()) { "$field is required" }
+    val parser = mapper.factory.createParser(trimmed)
+    val value: JsonNode = mapper.readTree(parser)
+    require(value != null) { "$field must be a JSON number" }
+    require(value.isNumber) { "$field must be a JSON number" }
+    require(parser.nextToken() == null) { "$field must contain a single JSON number" }
+    return value.toString()
+}
+
+/**
+ * 将 HTTP `typed_value` 视图转换成 JSON 请求体片段。
+ *
+ * 这里同时承担本地校验职责，确保 Kotlin 侧对 `number` 与 `json` 的编码规则
+ * 与服务端 `typed_value` 解释逻辑保持一致。
+ *
+ * @param value Kotlin 侧 typed metadata 值
+ * @return 可直接挂到 `typed_value` 字段上的 JSON 对象
+ * @throws IllegalArgumentException 如果 typed 值内部不合法
+ */
+fun userMetadataTypedValueToHttp(value: UserMetadataTypedValue): JsonNode =
+    mapper.createObjectNode().apply {
+        put("kind", value.kind)
+        when (value) {
+            is UserMetadataTypedValue.Bytes -> put("bytes_value", value.value)
+            is UserMetadataTypedValue.Bool -> put("bool_value", value.value)
+            is UserMetadataTypedValue.StringValue -> put("string_value", value.value)
+            is UserMetadataTypedValue.NumberValue -> {
+                val numberNode = mapper.readTree(normalizeMetadataNumberLiteral(value.literal, "typedValue.literal"))
+                set<JsonNode>("number_value", numberNode)
+            }
+            is UserMetadataTypedValue.JsonValue -> set<JsonNode>("json_value", value.value.deepCopy<JsonNode>())
+        }
+    }
+
+/**
+ * 解析 HTTP 响应中的 `typed_value` 字段。
+ *
+ * `typed_value` 是服务端根据原始字节额外推导出的视图，不参与 WS/proto wire。
+ * 由于这是一个可选增强字段，解析器采用“尽量提取、失败则忽略”的策略：
+ * 如果服务端没有返回，或返回了不完整的 typed 结构，则退回 `null`，继续以 [UserMetadata.value] 为准。
+ *
+ * @param node `typed_value` 对应的 JSON 节点
+ * @return 解析后的 Kotlin typed 值；无法稳定解析时返回 null
+ */
+fun userMetadataTypedValueFromHttp(node: JsonNode): UserMetadataTypedValue? {
+    if (node.isMissingNode || node.isNull) {
+        return null
+    }
+    return when (text(node, "kind")) {
+        "bytes" -> fieldNode(node, "bytes_value")
+            ?.takeUnless { it.isNull }
+            ?.let { raw -> runCatching { UserMetadataTypedValue.Bytes(raw.binaryValue()) }.getOrNull() }
+        "bool" -> fieldNode(node, "bool_value")
+            ?.takeUnless { it.isNull }
+            ?.let { UserMetadataTypedValue.Bool(it.booleanValue()) }
+        "string" -> fieldNode(node, "string_value")
+            ?.takeUnless { it.isNull }
+            ?.let { UserMetadataTypedValue.StringValue(it.asText()) }
+        "number" -> fieldNode(node, "number_value")
+            ?.takeUnless { it.isNull }
+            ?.let { UserMetadataTypedValue.NumberValue(it.toString()) }
+        "json" -> fieldNode(node, "json_value")
+            ?.let { UserMetadataTypedValue.JsonValue(it.deepCopy<JsonNode>()) }
+        else -> null
+    }
+}
+
 private fun userRefNode(node: JsonNode): UserRef = UserRef(longValue(node, "node_id"), longValue(node, "user_id"))
 
 /**
@@ -327,6 +410,7 @@ fun userMetadataFromHttp(node: JsonNode): UserMetadata = UserMetadata(
     owner = userRefNode(node.path("owner")),
     key = text(node, "key"),
     value = bytesValue(node, "value"),
+    typedValue = userMetadataTypedValueFromHttp(node.path("typed_value")),
     updatedAt = text(node, "updated_at"),
     deletedAt = text(node, "deleted_at"),
     expiresAt = text(node, "expires_at"),
@@ -688,6 +772,9 @@ fun userMetadataFromProto(value: Client.UserMetadata?): UserMetadata = if (value
     owner = userRefFromProto(value.owner),
     key = value.key,
     value = value.value.toByteArray(),
+    // WebSocket/protobuf wire 不携带 HTTP typed_value 视图；这里显式保留 null，
+    // 避免业务层误以为 WS 侧也具备同样的“强类型 metadata”能力。
+    typedValue = null,
     updatedAt = value.updatedAt,
     deletedAt = value.deletedAt,
     expiresAt = value.expiresAt,

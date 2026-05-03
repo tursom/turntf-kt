@@ -501,6 +501,10 @@ class TurntfClient(config: Config) {
     /**
      * 读取指定用户的一条私有元数据。
      *
+     * 这里走的是 WebSocket + protobuf RPC，wire 上只有原始字节 `value`；
+     * 因此返回结果中的 [UserMetadata.typedValue] 会始终保持为 `null`。
+     * 如果调用方需要 HTTP `typed_value` 视图，应改用 [http] 上的同名接口。
+     *
      * @param owner 元数据所属用户
      * @param key 元数据键名
      * @return 元数据条目
@@ -531,6 +535,8 @@ class TurntfClient(config: Config) {
      *
      * `expiresAt` 使用与服务端 HTTP API 相同的 RFC3339 字符串格式，
      * 调用者可以在两种传输协议间复用相同的值。
+     * 但 WebSocket/protobuf 侧 metadata 仍然只发送原始字节，不支持 HTTP `typed_value` 请求体，
+     * 因此这里继续要求 [value] 由调用方直接提供。
      *
      * @param owner 元数据所属用户
      * @param key 元数据键名
@@ -590,6 +596,7 @@ class TurntfClient(config: Config) {
      *
      * 支持按前缀过滤、游标分页和数量限制。
      * 使用服务端的 `prefix` / `after` / `limit` 游标语义。
+     * 返回条目只包含 protobuf 下发的原始字节值，不会携带 HTTP `typed_value` 视图。
      *
      * @param owner 元数据所属用户
      * @param prefix 键名前缀过滤，仅返回匹配该前缀的条目

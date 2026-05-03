@@ -18,6 +18,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class TurntfClientTest {
@@ -307,20 +308,24 @@ class TurntfClientTest {
             val owner = UserRef(4096, 1025)
             val metadata = client.getUserMetadata(owner, "prefs.theme")
             assertContentEquals(byteArrayOf(1, 2), metadata.value)
+            assertNull(metadata.typedValue)
             assertEquals("2026-05-01T00:00:00Z", metadata.expiresAt)
 
             val upserted = client.upsertUserMetadata(owner, "prefs.theme", byteArrayOf(3, 4), "2026-05-01T00:00:00Z")
             assertEquals("hlc-meta-2", upserted.updatedAt)
             assertContentEquals(byteArrayOf(3, 4), upserted.value)
+            assertNull(upserted.typedValue)
 
             val deleted = client.deleteUserMetadata(owner, "prefs.theme")
             assertEquals("hlc-meta-3", deleted.deletedAt)
+            assertNull(deleted.typedValue)
 
             val scan = client.scanUserMetadata(owner, prefix = "prefs.", after = "prefs.theme", limit = 2)
             assertEquals(2, scan.count)
             assertEquals("prefs.lang", scan.nextAfter)
             assertEquals(listOf("prefs.theme", "prefs.lang"), scan.items.map { it.key })
             assertContentEquals(byteArrayOf(5, 6), scan.items.last().value)
+            assertTrue(scan.items.all { it.typedValue == null })
 
             client.close()
         }
