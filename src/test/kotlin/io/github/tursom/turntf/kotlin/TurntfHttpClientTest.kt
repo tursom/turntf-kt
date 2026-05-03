@@ -10,6 +10,7 @@ import org.mindrot.jbcrypt.BCrypt
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class TurntfHttpClientTest {
@@ -42,6 +43,23 @@ class TurntfHttpClientTest {
                             assertEquals("alice.login", body.path("login_name").asText())
                             json(201, """{"node_id":4096,"user_id":1025,"username":"alice","login_name":"alice.login","role":"user","profile":{"tier":"gold"}}""")
                         }
+                        "GET /users" ->
+                            json(200, """[
+                                {"node_id":4096,"user_id":1025,"username":"alice","login_name":"alice.login","role":"user","profile":{"display_name":"Alice Visible"}},
+                                {"node_id":4096,"user_id":1027,"username":"carol","role":"user","profile":{"display_name":"Carol Visible"}}
+                            ]""".trimIndent())
+                        "GET /users?name=carol+visible" ->
+                            json(200, """[
+                                {"node_id":4096,"user_id":1027,"username":"carol","role":"user","profile":{"display_name":"Carol Visible"}}
+                            ]""".trimIndent())
+                        "GET /users?uid=4096%3A1027" ->
+                            json(200, """[
+                                {"node_id":4096,"user_id":1027,"username":"carol","role":"user","profile":{"display_name":"Carol Visible"}}
+                            ]""".trimIndent())
+                        "GET /users?name=carol&uid=4096%3A1027" ->
+                            json(200, """[
+                                {"node_id":4096,"user_id":1027,"username":"carol","role":"user","profile":{"display_name":"Carol Visible"}}
+                            ]""".trimIndent())
                         "GET /cluster/nodes/4096/logged-in-users" ->
                             json(200, """{"items":[{"node_id":4096,"user_id":1025,"username":"alice","login_name":"alice.login"}],"count":1}""")
                         "GET /nodes/4096/users/1025/metadata/settings.theme" -> {
@@ -91,6 +109,28 @@ class TurntfHttpClientTest {
             )
             assertEquals(4096, user.nodeId)
             assertEquals("alice.login", user.loginName)
+
+            val visibleUsers = client.listUsers(token)
+            assertEquals(2, visibleUsers.size)
+            assertEquals("alice.login", visibleUsers.first().loginName)
+
+            val zeroUidUsers = client.listUsers(token, UserListFilter(uid = UserRef(0, 0)))
+            assertEquals(2, zeroUidUsers.size)
+
+            val filteredByName = client.listUsers(token, UserListFilter(name = "  carol visible  "))
+            assertEquals(1, filteredByName.size)
+            assertEquals("carol", filteredByName.single().username)
+            assertEquals("", filteredByName.single().loginName)
+
+            val filteredByUid = client.listUsers(token, UserListFilter(uid = UserRef(4096, 1027)))
+            assertEquals(listOf(1027L), filteredByUid.map { it.userId })
+
+            val filteredByNameAndUid = client.listUsers(token, UserListFilter(name = "carol", uid = UserRef(4096, 1027)))
+            assertEquals(listOf(1027L), filteredByNameAndUid.map { it.userId })
+
+            assertFailsWith<IllegalArgumentException> {
+                client.listUsers(token, UserListFilter(uid = UserRef(4096, 0)))
+            }
 
             val loggedInUsers = client.listNodeLoggedInUsers(token, 4096)
             assertEquals(listOf("alice.login"), loggedInUsers.map { it.loginName })

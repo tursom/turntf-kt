@@ -152,6 +152,45 @@ class TurntfHttpClient(
         createUser(token, request.copy(role = if (request.role.isEmpty()) "channel" else request.role))
 
     /**
+     * 列出当前调用者可通讯的活跃用户，并支持名称与 uid 过滤。
+     *
+     * 服务端会先根据当前登录用户的权限、频道关系和黑名单关系裁剪“可通讯用户集合”，
+     * 再在该集合内应用 [filter]。这意味着普通用户不能通过此接口搜索到自己不可见的用户。
+     *
+     * SDK 公开的 `uid` 过滤统一使用 [UserRef]：
+     * - HTTP 传输时会自动编码为 `node_id:user_id`
+     * - `UserRef(0, 0)` 或 `null` 表示“不按 uid 过滤”
+     *
+     * 服务端可能会对普通用户看到的其他联系人隐藏 `login_name`，因此返回的 [User.loginName]
+     * 允许为空字符串；管理员或查看自己时仍可能拿到完整值。
+     *
+     * @param token 身份验证令牌；在未开启鉴权的服务端上可以传空字符串
+     * @param filter 过滤条件，支持 `name` 大小写不敏感子串匹配与 `uid` 精确过滤
+     * @return 当前用户可通讯的活跃用户列表
+     * @throws IllegalArgumentException 如果 `uid` 只填写了一半或字段值不是正整数
+     * @throws ConnectionError 如果网络请求失败
+     * @throws ProtocolError 如果服务器返回意外状态码
+     */
+    suspend fun listUsers(token: String, filter: UserListFilter = UserListFilter()): List<User> {
+        val normalized = normalizeUserListFilter(filter)
+        val path = buildString {
+            append("/users")
+            val query = buildList {
+                if (normalized.name.isNotEmpty()) {
+                    add("name=${encodeQueryComponent(normalized.name)}")
+                }
+                normalized.uid?.let { add("uid=${encodeQueryComponent(userRefToHttpUid(it))}") }
+            }
+            if (query.isNotEmpty()) {
+                append("?")
+                append(query.joinToString("&"))
+            }
+        }
+        val response = doJson("GET", path, token, null, setOf(200))
+        return itemsNode(response, "items").map(::userFromHttp)
+    }
+
+    /**
      * 读取指定用户的一条私有元数据。
      *
      * @param token 身份验证令牌

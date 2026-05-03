@@ -101,6 +101,31 @@ val channel = http.createChannel(
 
 `createChannel()` 是 `createUser()` 的封装，当 `role` 为空时自动补 `"channel"`。
 
+#### 列出当前用户可通讯的活跃用户
+
+```kotlin
+val users = http.listUsers(
+    token = token,
+    filter = UserListFilter(
+        name = "carol",
+        uid = UserRef(4096, 1027)
+    )
+)
+for (user in users) {
+    println("userId=${user.userId}, username=${user.username}, loginName=${user.loginName}")
+}
+```
+
+`name` 会在服务端做大小写不敏感子串匹配，匹配范围仅限“当前调用者可通讯的用户集合”。
+
+SDK 对外统一使用 `UserRef` 表达 `uid`：
+
+- HTTP 查询参数里会自动编码成 `node_id:user_id`
+- `uid = null` 或 `UserRef(0, 0)` 表示“不按 uid 过滤”
+- 半空 `uid`（如只有 `nodeId` 没有 `userId`）会在本地抛出 `IllegalArgumentException`
+
+普通用户查看其他联系人时，服务端可能会隐藏 `login_name`，因此返回的 `User.loginName` 允许为空字符串。
+
 ### 用户元数据
 
 用户私有元数据是 turntf 的键值对存储系统，每项由 `(owner, key)` 唯一标识。

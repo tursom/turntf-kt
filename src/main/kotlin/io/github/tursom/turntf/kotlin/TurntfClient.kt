@@ -392,6 +392,43 @@ class TurntfClient(config: Config) {
     suspend fun createChannel(request: CreateUserRequest): User = createUser(request.copy(role = if (request.role.isEmpty()) "channel" else request.role))
 
     /**
+     * 列出当前登录用户可通讯的活跃用户，并支持名称与 uid 过滤。
+     *
+     * 与 HTTP `GET /users` 一样，服务端会先收敛出“当前用户可通讯的用户集合”，
+     * 再在该集合上应用 [filter]。普通用户看到的其他联系人可能会被隐藏 `login_name`，
+     * 因此返回模型中的 [User.loginName] 允许为空字符串。
+     *
+     * `filter.uid` 在 Kotlin API 中统一使用 [UserRef] 表达：
+     * - `null` 或 `UserRef(0, 0)` 表示不按 uid 过滤
+     * - WebSocket 传输时会编码成 proto `UserRef`
+     * - 如果只填写了一半，SDK 会在本地抛出 [IllegalArgumentException]
+     *
+     * 注意：当 [Config.realtimeStream] 为 `true` 时，服务端当前会拒绝 `list_users` RPC，
+     * 并返回 `invalid_request`。SDK 保持与服务端一致，不在本地伪造结果。
+     *
+     * @param filter 过滤条件，支持 `name` 子串匹配与 `uid` 精确过滤
+     * @return 当前登录用户可通讯的活跃用户列表
+     * @throws IllegalArgumentException 如果 `uid` 只填写了一半或字段值不是正整数
+     * @throws TimeoutException 如果请求超时
+     */
+    @Suppress("UNCHECKED_CAST")
+    suspend fun listUsers(filter: UserListFilter = UserListFilter()): List<User> {
+        val normalized = normalizeUserListFilter(filter)
+        return rpc(
+            build = { requestId ->
+                val builder = Client.ListUsersRequest.newBuilder()
+                    .setRequestId(requestId)
+                    .setName(normalized.name)
+                normalized.uid?.let { builder.uid = userRefToProto(it) }
+                Client.ClientEnvelope.newBuilder()
+                    .setListUsers(builder.build())
+                    .build()
+            },
+            mapper = { value -> value as? List<User> ?: throw ProtocolError("missing items in list_users_response") }
+        )
+    }
+
+    /**
      * 获取用户信息。
      *
      * @param target 目标用户引用
@@ -1169,6 +1206,7 @@ class TurntfClient(config: Config) {
                 Client.ServerEnvelope.BodyCase.GET_USER_RESPONSE -> completePending(requireUnsigned(env.getUserResponse.requestId, "request_id"), userFromProto(env.getUserResponse.user))
                 Client.ServerEnvelope.BodyCase.UPDATE_USER_RESPONSE -> completePending(requireUnsigned(env.updateUserResponse.requestId, "request_id"), userFromProto(env.updateUserResponse.user))
                 Client.ServerEnvelope.BodyCase.DELETE_USER_RESPONSE -> completePending(requireUnsigned(env.deleteUserResponse.requestId, "request_id"), deleteUserResultFromProto(env.deleteUserResponse))
+                Client.ServerEnvelope.BodyCase.LIST_USERS_RESPONSE -> completePending(requireUnsigned(env.listUsersResponse.requestId, "request_id"), env.listUsersResponse.itemsList.map(::userFromProto))
                 Client.ServerEnvelope.BodyCase.GET_USER_METADATA_RESPONSE -> completePending(requireUnsigned(env.getUserMetadataResponse.requestId, "request_id"), userMetadataFromProto(env.getUserMetadataResponse.metadata))
                 Client.ServerEnvelope.BodyCase.UPSERT_USER_METADATA_RESPONSE -> completePending(requireUnsigned(env.upsertUserMetadataResponse.requestId, "request_id"), userMetadataFromProto(env.upsertUserMetadataResponse.metadata))
                 Client.ServerEnvelope.BodyCase.DELETE_USER_METADATA_RESPONSE -> completePending(requireUnsigned(env.deleteUserMetadataResponse.requestId, "request_id"), userMetadataFromProto(env.deleteUserMetadataResponse.metadata))

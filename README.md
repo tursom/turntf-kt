@@ -228,6 +228,7 @@ val client = TurntfClient(
 | 鉴权 | `loginWithPassword(nodeId, userId, password: PasswordInput)` | 使用已包装的密码登录 |
 | 鉴权 | `loginWithPassword(loginName, password: PasswordInput)` | 登录名 + 已包装密码 |
 | 用户管理 | `createUser(token, request)` / `createChannel(token, request)` | 创建用户 / 频道 |
+| 用户管理 | `listUsers(token, filter?)` | 列出当前调用者可通讯的活跃用户，支持 `name` / `uid` 过滤 |
 | 元数据 | `getUserMetadata(token, owner, key)` | 读取单条元数据 |
 | 元数据 | `upsertUserMetadata(token, owner, key, value, expiresAt?)` | 创建或替换元数据 |
 | 元数据 | `deleteUserMetadata(token, owner, key)` | 删除元数据 |
@@ -284,6 +285,7 @@ val client = TurntfClient(
 | 消息 | `sendPacket(input: SendPacketInput): RelayAccepted` | 发送瞬时数据包 |
 | 消息 | `sendPacket(target, body, deliveryMode, targetSession?)` | 发送瞬时数据包的便捷重载 |
 | 用户 | `createUser(request)` / `createChannel(request)` | 创建用户/频道 |
+| 用户 | `listUsers(filter?)` | 列出当前登录用户可通讯的活跃用户，支持 `name` / `uid` 过滤 |
 | 用户 | `getUser(target)` | 获取用户信息 |
 | 用户 | `updateUser(target, request)` | 部分更新用户信息 |
 | 用户 | `deleteUser(target)` | 删除用户 |
@@ -309,6 +311,13 @@ val client = TurntfClient(config)
 val token = client.login(4096, 1, "root")
 val node = client.http.listClusterNodes(token)
 ```
+
+`listUsers()` 的过滤条件通过 `UserListFilter` 表达。SDK 对外统一使用 `UserRef` 作为 `uid`：
+- HTTP 会编码成 `node_id:user_id`
+- WebSocket/proto 会编码成 `UserRef`
+- `uid = UserRef(0, 0)` 或 `null` 表示“不按 uid 过滤”
+
+普通用户通过用户列表看到他人时，服务端可能会隐藏 `login_name`，因此 `User.loginName` 允许为空字符串。
 
 ## 选型建议
 

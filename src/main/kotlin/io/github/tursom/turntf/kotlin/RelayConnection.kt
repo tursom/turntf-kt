@@ -1,5 +1,7 @@
 package io.github.tursom.turntf.kotlin
 
+import io.github.tursom.turntf.kotlin.internal.sessionRefFromProto
+import io.github.tursom.turntf.kotlin.internal.sessionRefToProto
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException

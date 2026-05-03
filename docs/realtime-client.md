@@ -117,6 +117,7 @@ HTTP 登录返回的是 Bearer token，而不是 `LoginInfo`。这点和 WebSock
 
 - `createUser()`
 - `createChannel()`
+- `listUsers()`
 
 `createChannel()` 只是把 `role` 默认补成 `channel`，其余行为与 `createUser()` 一致。
 
@@ -124,6 +125,13 @@ HTTP 登录返回的是 Bearer token，而不是 `LoginInfo`。这点和 WebSock
 
 - `null` 表示不修改登录名
 - `""` 表示解绑当前登录名
+
+`listUsers()` 使用 `UserListFilter` 描述过滤条件：
+
+- `name` 会在当前登录用户可通讯的用户集合内做大小写不敏感子串匹配
+- `uid` 在 Kotlin API 中统一用 `UserRef` 表达；WebSocket 传输时会编码成 proto `UserRef`
+- `uid = null` 或 `UserRef(0, 0)` 表示“不按 uid 过滤”
+- 普通用户查看其他联系人时，服务端可能会隐藏 `login_name`，因此 `User.loginName` 允许为空字符串
 
 ### 消息与 packet
 
@@ -418,6 +426,7 @@ client.sendPacket(
 会被服务端拒绝的典型能力包括：
 
 - 持久 `sendMessage()`
+- `listUsers()`
 - `createUser()` / `getUser()` / `updateUser()` / `deleteUser()`
 - `listMessages()`
 - `upsertAttachment()` / `deleteAttachment()` / `listAttachments()`

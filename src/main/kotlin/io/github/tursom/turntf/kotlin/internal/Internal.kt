@@ -25,10 +25,13 @@ import io.github.tursom.turntf.kotlin.Subscription
 import io.github.tursom.turntf.kotlin.User
 import io.github.tursom.turntf.kotlin.UserMetadata
 import io.github.tursom.turntf.kotlin.UserMetadataScanResult
+import io.github.tursom.turntf.kotlin.UserListFilter
 import io.github.tursom.turntf.kotlin.UserRef
 import notifier.client.v1.Client
 import com.google.protobuf.ByteString
 import java.net.URI
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 
 /**
  * Jackson ObjectMapper 实例，用于 JSON 解析和序列化。
@@ -57,6 +60,45 @@ fun validateBaseUrl(baseUrl: String) {
 fun validateUserRef(ref: UserRef, field: String) {
     require(ref.nodeId > 0) { "$field.nodeId is required" }
     require(ref.userId > 0) { "$field.userId is required" }
+}
+
+/**
+ * 规范化可通讯用户列表的过滤条件。
+ *
+ * `uid` 在 SDK 公共 API 中统一用 [UserRef] 表示，但服务端 HTTP 与 proto 的线格式不同。
+ * 这里先把调用者输入收敛为统一语义，再由各传输层决定如何编码：
+ * - `uid == null` 或 `(0, 0)` => 不发送 uid 过滤
+ * - 只填一半或填入非正整数 => 立即抛出 [IllegalArgumentException]
+ * - `name` => 去除首尾空白；全空白视为未设置
+ *
+ * 这样可以保证 HTTP `GET /users` 与 WebSocket `list_users` 封装共享同一套参数校验规则。
+ *
+ * @param filter 调用方传入的原始过滤条件
+ * @return 规范化后的过滤条件，其中空白 `name` 会变成空字符串，零值 `uid` 会变成 `null`
+ * @throws IllegalArgumentException 如果 `uid` 只提供了部分字段，或字段值不是正整数
+ */
+fun normalizeUserListFilter(filter: UserListFilter): UserListFilter =
+    UserListFilter(
+        name = filter.name.trim(),
+        uid = normalizeOptionalUserRef(filter.uid, "uid")
+    )
+
+/**
+ * 将可选 [UserRef] 过滤条件规范化为“真实用户”或“未设置”。
+ *
+ * @param ref 调用方提供的用户引用，`null` 或 `(0, 0)` 都表示未设置
+ * @param field 字段名前缀，用于构造精确的异常消息
+ * @return 规范化后的用户引用；如果未设置则返回 `null`
+ * @throws IllegalArgumentException 如果只填写了部分字段，或字段值不是正整数
+ */
+fun normalizeOptionalUserRef(ref: UserRef?, field: String): UserRef? {
+    ref ?: return null
+    if (ref.isZero()) {
+        return null
+    }
+    require(ref.nodeId > 0) { "$field.nodeId must be positive when $field is provided" }
+    require(ref.userId > 0) { "$field.userId must be positive when $field is provided" }
+    return ref
 }
 
 /**
@@ -133,6 +175,25 @@ fun websocketUrl(baseUrl: String, realtime: Boolean): String {
     val path = if (uri.path.isNullOrBlank() || uri.path == "/") suffix else uri.path.removeSuffix("/") + suffix
     return URI(scheme, uri.userInfo, uri.host, uri.port, path, null, null).toString()
 }
+
+/**
+ * 将 [UserRef] 编码为 HTTP `GET /users` 使用的 `uid=node_id:user_id` 查询参数值。
+ *
+ * @param ref 已规范化的用户引用
+ * @return 形如 `4096:1025` 的字符串
+ */
+fun userRefToHttpUid(ref: UserRef): String {
+    validateUserRef(ref, "uid")
+    return "${ref.nodeId}:${ref.userId}"
+}
+
+/**
+ * 对 HTTP 查询参数值进行 URL 编码。
+ *
+ * @param value 原始参数值
+ * @return 编码后的查询参数值
+ */
+fun encodeQueryComponent(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8)
 
 // REST 端点在更大的 JSON 载荷中嵌入 JSON 子文档；空字节被视为空对象，
 // 以便附件/profile 辅助函数可以复用相同的序列化路径。

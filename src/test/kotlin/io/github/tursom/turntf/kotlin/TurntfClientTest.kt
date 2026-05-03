@@ -16,6 +16,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -320,6 +321,195 @@ class TurntfClientTest {
             assertEquals("prefs.lang", scan.nextAfter)
             assertEquals(listOf("prefs.theme", "prefs.lang"), scan.items.map { it.key })
             assertContentEquals(byteArrayOf(5, 6), scan.items.last().value)
+
+            client.close()
+        }
+    }
+
+    @Test
+    fun listUsersRpcSupportsFiltersAndRedactedLoginName() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                private var listUsersRequests = 0
+
+                override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+                    val env = Client.ClientEnvelope.parseFrom(bytes.toByteArray())
+                    when (env.bodyCase) {
+                        Client.ClientEnvelope.BodyCase.LOGIN -> {
+                            assertTrue(BCrypt.checkpw("alice-password", env.login.password))
+                            webSocket.send(
+                                Client.ServerEnvelope.newBuilder()
+                                    .setLoginResponse(
+                                        Client.LoginResponse.newBuilder()
+                                            .setUser(
+                                                Client.User.newBuilder()
+                                                    .setNodeId(4096)
+                                                    .setUserId(1025)
+                                                    .setUsername("alice")
+                                                    .setRole("user")
+                                                    .setLoginName("alice.login")
+                                                    .build()
+                                            )
+                                            .setProtocolVersion("client-v1alpha1")
+                                            .setSessionRef(Client.SessionRef.newBuilder().setServingNodeId(4096).setSessionId("session-a").build())
+                                            .build()
+                                    )
+                                    .build()
+                                    .toByteArray()
+                                    .toByteString()
+                            )
+                        }
+                        Client.ClientEnvelope.BodyCase.LIST_USERS -> {
+                            listUsersRequests += 1
+                            val request = env.listUsers
+                            when (listUsersRequests) {
+                                1 -> {
+                                    assertEquals("", request.name)
+                                    assertFalse(request.hasUid())
+                                    webSocket.send(
+                                        Client.ServerEnvelope.newBuilder()
+                                            .setListUsersResponse(
+                                                Client.ListUsersResponse.newBuilder()
+                                                    .setRequestId(request.requestId)
+                                                    .addItems(
+                                                        Client.User.newBuilder()
+                                                            .setNodeId(4096)
+                                                            .setUserId(1025)
+                                                            .setUsername("alice")
+                                                            .setRole("user")
+                                                            .setLoginName("alice.login")
+                                                            .build()
+                                                    )
+                                                    .addItems(
+                                                        Client.User.newBuilder()
+                                                            .setNodeId(4096)
+                                                            .setUserId(1027)
+                                                            .setUsername("carol")
+                                                            .setRole("user")
+                                                            .build()
+                                                    )
+                                                    .setCount(2)
+                                                    .build()
+                                            )
+                                            .build()
+                                            .toByteArray()
+                                            .toByteString()
+                                    )
+                                }
+                                2 -> {
+                                    assertEquals("carol visible", request.name)
+                                    assertFalse(request.hasUid())
+                                    webSocket.send(
+                                        Client.ServerEnvelope.newBuilder()
+                                            .setListUsersResponse(
+                                                Client.ListUsersResponse.newBuilder()
+                                                    .setRequestId(request.requestId)
+                                                    .addItems(
+                                                        Client.User.newBuilder()
+                                                            .setNodeId(4096)
+                                                            .setUserId(1027)
+                                                            .setUsername("carol")
+                                                            .setRole("user")
+                                                            .build()
+                                                    )
+                                                    .setCount(1)
+                                                    .build()
+                                            )
+                                            .build()
+                                            .toByteArray()
+                                            .toByteString()
+                                    )
+                                }
+                                3 -> {
+                                    assertTrue(request.hasUid())
+                                    assertEquals(4096, request.uid.nodeId)
+                                    assertEquals(1027, request.uid.userId)
+                                    webSocket.send(
+                                        Client.ServerEnvelope.newBuilder()
+                                            .setListUsersResponse(
+                                                Client.ListUsersResponse.newBuilder()
+                                                    .setRequestId(request.requestId)
+                                                    .addItems(
+                                                        Client.User.newBuilder()
+                                                            .setNodeId(4096)
+                                                            .setUserId(1027)
+                                                            .setUsername("carol")
+                                                            .setRole("user")
+                                                            .build()
+                                                    )
+                                                    .setCount(1)
+                                                    .build()
+                                            )
+                                            .build()
+                                            .toByteArray()
+                                            .toByteString()
+                                    )
+                                }
+                                4 -> {
+                                    assertEquals("carol", request.name)
+                                    assertTrue(request.hasUid())
+                                    assertEquals(4096, request.uid.nodeId)
+                                    assertEquals(1027, request.uid.userId)
+                                    webSocket.send(
+                                        Client.ServerEnvelope.newBuilder()
+                                            .setListUsersResponse(
+                                                Client.ListUsersResponse.newBuilder()
+                                                    .setRequestId(request.requestId)
+                                                    .addItems(
+                                                        Client.User.newBuilder()
+                                                            .setNodeId(4096)
+                                                            .setUserId(1027)
+                                                            .setUsername("carol")
+                                                            .setRole("user")
+                                                            .build()
+                                                    )
+                                                    .setCount(1)
+                                                    .build()
+                                            )
+                                            .build()
+                                            .toByteArray()
+                                            .toByteString()
+                                    )
+                                    webSocket.close(1000, "done")
+                                }
+                            }
+                        }
+                        else -> {}
+                    }
+                }
+            }))
+            server.start()
+
+            val client = TurntfClient(
+                Config(
+                    baseUrl = server.url("/").toString(),
+                    credentials = Credentials(4096, 1025, plainPassword("alice-password")),
+                    reconnect = false,
+                    pingInterval = java.time.Duration.ofHours(1)
+                )
+            )
+
+            val job = launch { client.connect() }
+            job.join()
+
+            val visibleUsers = client.listUsers(UserListFilter(uid = UserRef(0, 0)))
+            assertEquals(2, visibleUsers.size)
+            assertEquals("alice.login", visibleUsers.first().loginName)
+
+            val filteredByName = client.listUsers(UserListFilter(name = "  carol visible  "))
+            assertEquals(1, filteredByName.size)
+            assertEquals("carol", filteredByName.single().username)
+            assertEquals("", filteredByName.single().loginName)
+
+            val filteredByUid = client.listUsers(UserListFilter(uid = UserRef(4096, 1027)))
+            assertEquals(listOf(1027L), filteredByUid.map { it.userId })
+
+            val filteredByNameAndUid = client.listUsers(UserListFilter(name = "carol", uid = UserRef(4096, 1027)))
+            assertEquals(listOf(1027L), filteredByNameAndUid.map { it.userId })
+
+            assertFailsWith<IllegalArgumentException> {
+                client.listUsers(UserListFilter(uid = UserRef(4096, 0)))
+            }
 
             client.close()
         }

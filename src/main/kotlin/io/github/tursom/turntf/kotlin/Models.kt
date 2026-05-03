@@ -185,7 +185,17 @@ data class Config(
  * @param nodeId 节点 ID
  * @param userId 用户 ID
  */
-data class UserRef(val nodeId: Long, val userId: Long)
+data class UserRef(val nodeId: Long, val userId: Long) {
+    /**
+     * 判断该引用是否为协议里的“零值用户”sentinel。
+     *
+     * 某些请求允许用 `(0, 0)` 表示“当前登录用户”或“不按 uid 过滤”。
+     * SDK 在这些语义化入口上会把该值当作“未指定”，而不是一个真实用户。
+     *
+     * @return 如果 `nodeId` 与 `userId` 都为 0，则返回 `true`
+     */
+    fun isZero(): Boolean = nodeId == 0L && userId == 0L
+}
 
 /**
  * 会话引用，通过服务节点 ID 和会话 ID 唯一标识一个客户端会话。
@@ -216,7 +226,9 @@ data class SessionRef(val servingNodeId: Long, val sessionId: String) {
  * @param createdAt 用户创建时间的 RFC3339 字符串
  * @param updatedAt 用户信息最后更新时间的 RFC3339 字符串
  * @param originNodeId 用户所属的源节点 ID（分布式环境下使用）
- * @param loginName 登录名，用于替代 nodeId+userId 的传统登录方式
+ * @param loginName 登录名，用于替代 nodeId+userId 的传统登录方式。
+ * 当调用 `GET /users` 或 `list_users` 查询可通讯用户列表时，普通用户查看他人记录可能拿到空字符串，
+ * 因为服务端会按可见性策略隐藏其他人的 `login_name`；管理员或用户查看自己时仍可见。
  */
 data class User(
     val nodeId: Long,
@@ -680,6 +692,27 @@ data class OperationsStatus(
  * @param user 被删除用户的引用
  */
 data class DeleteUserResult(val status: String, val user: UserRef)
+
+/**
+ * 可通讯用户列表的过滤条件，同时用于 HTTP 和 WebSocket/proto。
+ *
+ * SDK 对外统一暴露 [UserRef] 形式的 `uid` 过滤：
+ * - HTTP `GET /users` 会把它编码成 `node_id:user_id` 字符串
+ * - WebSocket `list_users` RPC 会把它编码成 proto `UserRef`
+ *
+ * `uid = null` 或 `uid = UserRef(0, 0)` 都表示“不按 uid 过滤”。
+ * 如果只填写了一半（如 `nodeId > 0` 但 `userId == 0`），SDK 会在本地抛出
+ * [IllegalArgumentException]，避免把无效请求发到服务端。
+ *
+ * `name` 会在发送前做 `trim()`；空白值会被视为未设置。
+ *
+ * @param name 名称过滤，服务端会在当前用户可见的用户集合内做大小写不敏感子串匹配
+ * @param uid 精确过滤的用户引用；HTTP 会序列化为 `node_id:user_id`，proto 会序列化为 `UserRef`
+ */
+data class UserListFilter(
+    val name: String = "",
+    val uid: UserRef? = null
+)
 
 /**
  * 登录成功后的信息。
