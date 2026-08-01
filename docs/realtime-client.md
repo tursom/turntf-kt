@@ -309,7 +309,10 @@ SDK 收到持久消息时，固定顺序是：
 
 - `closed == false`
 - `Config.reconnect == true`
-- 失败原因不是登录阶段的 `ServerError(code = "unauthorized")`
+- 失败原因不是登录阶段的终止性错误：
+  `ServerError(code = "unauthorized")`、
+  `ServerError(code = "unsupported_protocol_version")` 或登录响应版本不匹配的
+  `ProtocolError`
 
 退避策略：
 
@@ -325,8 +328,12 @@ SDK 收到持久消息时，固定顺序是：
 1. 调用 `cursorStore.loadSeenMessages()`
 2. 把结果写入新的 `LoginRequest.seen_messages`
 3. 重新发送同一份 `Credentials`
+4. 在 `LoginRequest.protocol_version` 中发送 SDK 内部固定的 `client-v1alpha5`
 
 也就是说，去重恢复完全依赖 `CursorStore` 的内容，而不是依赖上一条连接上的 ack 历史。
+协议版本没有配置项；初连和每次重连都声明同一个版本。SDK 只有在确认
+`LoginResponse.protocol_version == "client-v1alpha5"` 后，才会发布
+`loginState`、`connectionState = CONNECTED` 和 `ClientEvent.Login`。
 
 ### 自动 ping
 
@@ -449,11 +456,16 @@ SDK 的异常基类是 `TurntfException`，主要派生类型如下：
 
 ### 登录阶段错误
 
-如果登录阶段收到 `ServerError(code = "unauthorized")`：
+如果登录阶段收到 `ServerError(code = "unauthorized")` 或
+`ServerError(code = "unsupported_protocol_version")`：
 
 - `connect()` 会失败
 - SDK 会把 `stopReconnect` 置为 `true`
-- 后续不会自动重试，避免对服务端做无意义爆破
+- 后续不会自动重试
+
+服务端返回成功登录响应，但 `protocol_version` 为空或不是
+`client-v1alpha5` 时，SDK 会抛出 `ProtocolError`。该错误同样发生在 socket、
+登录状态及事件发布之前，并会关闭当前连接、清理 pending RPC、停止自动重连。
 
 ### 已登录阶段错误
 

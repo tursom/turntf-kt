@@ -224,7 +224,8 @@ class MyDatabaseCursorStore(private val db: MyDatabase) : CursorStore {
 触发条件：
 - `closed == false`
 - `Config.reconnect == true`（默认为 true）
-- 失败原因不是 `ServerError(code = "unauthorized")`
+- 失败原因不是终止性登录错误：`unauthorized`、
+  `unsupported_protocol_version` 或登录响应协议版本不匹配
 
 退避策略：
 - 初始延迟：`initialReconnectDelay`（默认 1 秒）
@@ -236,7 +237,13 @@ class MyDatabaseCursorStore(private val db: MyDatabase) : CursorStore {
 1. 调用 `cursorStore.loadSeenMessages()` 获取已持久化游标
 2. 将游标写入新的 `LoginRequest.seen_messages`
 3. 重复发送同一份 `Credentials`
-4. 如果服务端返回 `unauthorized`，`stopReconnect = true`，不再重试
+4. 在登录帧中声明 SDK 内部固定的 `client-v1alpha5`
+5. 只有服务端确认相同版本后，才发布登录 Flow 状态和 `ClientEvent.Login`
+
+服务端返回 `unauthorized` 或 `unsupported_protocol_version` 时抛出
+`ServerError`；成功响应中的版本为空或不是 `client-v1alpha5` 时抛出
+`ProtocolError`。这些错误都会关闭当前连接、清理 pending RPC，并将
+`stopReconnect` 置为 `true`，不再重试。协议版本不提供业务配置项。
 
 ## 错误处理
 

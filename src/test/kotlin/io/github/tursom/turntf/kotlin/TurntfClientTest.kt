@@ -2,7 +2,9 @@ package io.github.tursom.turntf.kotlin
 
 import com.google.protobuf.ByteString
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.runTest
 import notifier.client.v1.Client
 import okhttp3.Response
@@ -12,6 +14,11 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okio.ByteString.Companion.toByteString
 import org.mindrot.jbcrypt.BCrypt
+import java.time.Duration
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -45,7 +52,7 @@ class TurntfClientTest {
                                                     .setLoginName("alice.login")
                                                     .build()
                                             )
-                                            .setProtocolVersion("client-v1alpha1")
+                                            .setProtocolVersion("client-v1alpha5")
                                             .setSessionRef(Client.SessionRef.newBuilder().setServingNodeId(4096).setSessionId("session-a").build())
                                             .build()
                                     )
@@ -161,7 +168,7 @@ class TurntfClientTest {
                                                     .setLoginName("alice.login")
                                                     .build()
                                             )
-                                            .setProtocolVersion("client-v1alpha1")
+                                            .setProtocolVersion("client-v1alpha5")
                                             .setSessionRef(Client.SessionRef.newBuilder().setServingNodeId(4096).setSessionId("session-a").build())
                                             .build()
                                     )
@@ -355,7 +362,7 @@ class TurntfClientTest {
                                                     .setLoginName("alice.login")
                                                     .build()
                                             )
-                                            .setProtocolVersion("client-v1alpha1")
+                                            .setProtocolVersion("client-v1alpha5")
                                             .setSessionRef(Client.SessionRef.newBuilder().setServingNodeId(4096).setSessionId("session-a").build())
                                             .build()
                                     )
@@ -544,7 +551,7 @@ class TurntfClientTest {
                                                     .setLoginName("alice.login")
                                                     .build()
                                             )
-                                            .setProtocolVersion("client-v1alpha1")
+                                            .setProtocolVersion("client-v1alpha5")
                                             .setSessionRef(Client.SessionRef.newBuilder().setServingNodeId(4096).setSessionId("session-a").build())
                                             .build()
                                     )
@@ -662,4 +669,144 @@ class TurntfClientTest {
             client.close()
         }
     }
+
+    @Test
+    fun initialAndReconnectLoginFramesDeclareCurrentProtocolVersion() = runTest {
+        MockWebServer().use { server ->
+            val versions = ConcurrentLinkedQueue<String>()
+            val attempts = AtomicInteger()
+            val reconnected = CountDownLatch(1)
+            val listener = object : WebSocketListener() {
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(code, reason)
+                }
+
+                override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+                    val env = Client.ClientEnvelope.parseFrom(bytes.toByteArray())
+                    if (env.bodyCase != Client.ClientEnvelope.BodyCase.LOGIN) return
+                    versions.add(env.login.protocolVersion)
+                    val attempt = attempts.incrementAndGet()
+                    webSocket.send(loginResponse("client-v1alpha5").toByteArray().toByteString())
+                    if (attempt == 1) {
+                        webSocket.close(1012, "restart")
+                    } else {
+                        reconnected.countDown()
+                    }
+                }
+            }
+            server.enqueue(MockResponse().withWebSocketUpgrade(listener))
+            server.enqueue(MockResponse().withWebSocketUpgrade(listener))
+            server.start()
+
+            val client = TurntfClient(reconnectingConfig(server))
+            client.connect()
+            val completed = withContext(Dispatchers.IO) { reconnected.await(2, TimeUnit.SECONDS) }
+            assertTrue(completed)
+            assertEquals(listOf("client-v1alpha5", "client-v1alpha5"), versions.toList())
+            client.close()
+        }
+    }
+
+    @Test
+    fun unsupportedProtocolServerErrorIsTerminal() = runTest {
+        MockWebServer().use { server ->
+            val versions = ConcurrentLinkedQueue<String>()
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(code, reason)
+                }
+
+                override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+                    val env = Client.ClientEnvelope.parseFrom(bytes.toByteArray())
+                    versions.add(env.login.protocolVersion)
+                    webSocket.send(
+                        Client.ServerEnvelope.newBuilder()
+                            .setError(
+                                Client.Error.newBuilder()
+                                    .setCode("unsupported_protocol_version")
+                                    .setMessage("unsupported client protocol version")
+                                    .setRequestId(0)
+                                    .build()
+                            )
+                            .build()
+                            .toByteArray()
+                            .toByteString()
+                    )
+                }
+            }))
+            server.start()
+
+            val client = TurntfClient(reconnectingConfig(server))
+            val error = assertFailsWith<ServerError> { client.connect() }
+            assertEquals("unsupported_protocol_version", error.code)
+            withContext(Dispatchers.IO) { Thread.sleep(100) }
+            assertEquals(listOf("client-v1alpha5"), versions.toList())
+            assertEquals(1, server.requestCount)
+            assertNull(client.loginState.value)
+            client.close()
+        }
+    }
+
+    @Test
+    fun mismatchedLoginResponseVersionIsTerminalBeforeStatePublication() = runTest {
+        listOf("", "client-v1alpha4").forEach { version ->
+            MockWebServer().use { server ->
+                val versions = ConcurrentLinkedQueue<String>()
+                server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                    override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                        webSocket.close(code, reason)
+                    }
+
+                    override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+                        val env = Client.ClientEnvelope.parseFrom(bytes.toByteArray())
+                        versions.add(env.login.protocolVersion)
+                        webSocket.send(loginResponse(version).toByteArray().toByteString())
+                    }
+                }))
+                server.start()
+
+                val client = TurntfClient(reconnectingConfig(server))
+                assertFailsWith<ProtocolError> { client.connect() }
+                withContext(Dispatchers.IO) { Thread.sleep(100) }
+                assertEquals(listOf("client-v1alpha5"), versions.toList())
+                assertEquals(1, server.requestCount)
+                assertNull(client.loginState.value)
+                assertEquals(ConnectionState.DISCONNECTED, client.connectionState.value)
+                client.close()
+            }
+        }
+    }
+
+    private fun reconnectingConfig(server: MockWebServer): Config = Config(
+        baseUrl = server.url("/").toString(),
+        credentials = Credentials(4096, 1025, plainPassword("alice-password")),
+        reconnect = true,
+        initialReconnectDelay = Duration.ofMillis(10),
+        maxReconnectDelay = Duration.ofMillis(20),
+        pingInterval = Duration.ofHours(1),
+        requestTimeout = Duration.ofSeconds(1)
+    )
+
+    private fun loginResponse(protocolVersion: String): Client.ServerEnvelope =
+        Client.ServerEnvelope.newBuilder()
+            .setLoginResponse(
+                Client.LoginResponse.newBuilder()
+                    .setUser(
+                        Client.User.newBuilder()
+                            .setNodeId(4096)
+                            .setUserId(1025)
+                            .setUsername("alice")
+                            .setRole("user")
+                            .build()
+                    )
+                    .setProtocolVersion(protocolVersion)
+                    .setSessionRef(
+                        Client.SessionRef.newBuilder()
+                            .setServingNodeId(4096)
+                            .setSessionId("session-version-test")
+                            .build()
+                    )
+                    .build()
+            )
+            .build()
 }

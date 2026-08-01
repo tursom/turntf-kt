@@ -250,11 +250,16 @@ val client = TurntfClient(
 `TurntfClient` 在 WebSocket 长连接上完成以下工作：
 
 - 登录认证与重登录（断线时自动使用凭据重新登录）
+- 初连和重连都会声明固定协议版本 `client-v1alpha5`，并在发布登录状态前校验服务端确认值
 - `request_id` 关联下的请求/响应 RPC
 - `MessagePushed` 推送和 `sendMessageResponse` 回包的本地位移持久化
 - `CursorStore` 管理、`seen_messages` 重放和自动 `AckMessage`
 - 通过 `events` / `loginState` / `connectionState` 三套 Flow 暴露运行时状态
 - 自动 Ping 保活、自动重连（指数退避）、登录失败停重试判定
+
+协议版本由 SDK 内部维护，不提供配置项。服务端显式返回
+`unsupported_protocol_version`，或登录成功响应中的版本为空/不是
+`client-v1alpha5`，都会使本次登录终止并停止自动重连。
 
 **事件流 (`events: SharedFlow<ClientEvent>`)**
 

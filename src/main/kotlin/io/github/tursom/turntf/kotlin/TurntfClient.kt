@@ -56,6 +56,7 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class TurntfClient(config: Config) {
     companion object {
+        private const val CLIENT_PROTOCOL_VERSION = "client-v1alpha5"
         private const val CLOSED_MESSAGE = "turntf client is closed"
         private const val NOT_CONNECTED_MESSAGE = "turntf client is not connected"
         private const val DISCONNECTED_MESSAGE = "turntf websocket disconnected"
@@ -1021,6 +1022,7 @@ class TurntfClient(config: Config) {
         if (closed || stopReconnect || !config.reconnect) {
             return false
         }
+        // 凭据和 SDK 编译时 wire epoch 都不会因重拨而改变；对应的登录失败只能由调用方升级或重新配置。
         return error !is ServerError || !error.unauthorized()
     }
 
@@ -1086,6 +1088,7 @@ class TurntfClient(config: Config) {
             val login = Client.LoginRequest.newBuilder()
                 .setPassword(config.credentials.password.wireValue())
                 .setTransientOnly(config.transientOnly)
+                .setProtocolVersion(CLIENT_PROTOCOL_VERSION)
             if (config.credentials.loginName.isNotBlank()) {
                 login.loginName = config.credentials.loginName
             } else {
@@ -1135,6 +1138,21 @@ class TurntfClient(config: Config) {
         private fun handleLoginEnvelope(webSocket: WebSocket, env: Client.ServerEnvelope) {
             when (env.bodyCase) {
                 Client.ServerEnvelope.BodyCase.LOGIN_RESPONSE -> {
+                    val got = env.loginResponse.protocolVersion
+                    if (got != CLIENT_PROTOCOL_VERSION) {
+                        // 历史 ClientEnvelope/ServerEnvelope 曾把相同 tag 重新赋予完全不同的 RPC。
+                        // 因此版本不匹配不是可重试的网络故障：必须在写入 socket/auth 状态、
+                        // 更新 loginState/connectionState、完成 firstConnect 或发布 Login 事件前终止，
+                        // 否则后续帧可能被解释成另一种操作。
+                        val error = ProtocolError(
+                            "unsupported login response protocol version: got=\"$got\" want=\"$CLIENT_PROTOCOL_VERSION\""
+                        )
+                        stopReconnect = true
+                        attempt.login.completeExceptionally(error)
+                        attempt.close.complete(error)
+                        webSocket.close(1002, "protocol version mismatch")
+                        return
+                    }
                     val info = loginInfoFromProto(env.loginResponse)
                     synchronized(stateLock) {
                         this@TurntfClient.webSocket = webSocket
@@ -1150,7 +1168,8 @@ class TurntfClient(config: Config) {
                 }
                 Client.ServerEnvelope.BodyCase.ERROR -> {
                     val error = ServerError(env.error.code, env.error.message, env.error.requestId)
-                    if (error.unauthorized()) {
+                    // 版本常量与凭据一样固定在当前客户端实例中，自动重连无法修复这两类拒绝。
+                    if (error.unauthorized() || error.code == "unsupported_protocol_version") {
                         stopReconnect = true
                     }
                     attempt.login.completeExceptionally(error)
